@@ -28,10 +28,6 @@ using System;
 using System.IO;
 using System.Text;
 
-#if NETFX_CORE
-using Encoding = Portable.Text.Encoding;
-#endif
-
 namespace MailKit {
 	/// <summary>
 	/// A default protocol logger for logging the communication between a client and server.
@@ -52,7 +48,6 @@ namespace MailKit {
 		bool clientMidline;
 		bool serverMidline;
 
-#if !NETFX_CORE
 		/// <summary>
 		/// Initializes a new instance of the <see cref="MailKit.ProtocolLogger"/> class.
 		/// </summary>
@@ -68,7 +63,6 @@ namespace MailKit {
 		{
 			stream = File.Open (fileName, append ? FileMode.Append : FileMode.Create, FileAccess.Write, FileShare.Read);
 		}
-#endif
 
 		/// <summary>
 		/// Initializes a new instance of the <see cref="MailKit.ProtocolLogger"/> class.
@@ -98,6 +92,17 @@ namespace MailKit {
 		~ProtocolLogger ()
 		{
 			Dispose (false);
+		}
+
+		/// <summary>
+		/// Get the log stream.
+		/// </summary>
+		/// <remarks>
+		/// Gets the log stream.
+		/// </remarks>
+		/// <value>The log sstream.</value>
+		public Stream Stream {
+			get { return stream; }
 		}
 
 		#region IProtocolLogger implementation

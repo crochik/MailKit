@@ -29,19 +29,9 @@ using System.IO;
 using System.Net;
 using System.Text;
 using System.Threading;
+using System.Net.Sockets;
 using System.Threading.Tasks;
 using System.Collections.Generic;
-
-#if NETFX_CORE
-using Windows.Networking;
-using Windows.Networking.Sockets;
-using Windows.Storage.Streams;
-using Encoding = Portable.Text.Encoding;
-#else
-using System.Net.Sockets;
-using System.Net.Security;
-using System.Security.Cryptography.X509Certificates;
-#endif
 
 using MailKit.Security;
 
@@ -401,7 +391,6 @@ namespace MailKit.Net.Imap
 			return ConnectAsync (host, port, options, true, cancellationToken);
 		}
 
-#if !NETFX_CORE
 		/// <summary>
 		/// Asynchronously establish a connection to the specified IMAP or IMAP/S server using the provided socket.
 		/// </summary>
@@ -537,9 +526,8 @@ namespace MailKit.Net.Imap
 		/// </exception>
 		public override Task ConnectAsync (Stream stream, string host, int port = 0, SecureSocketOptions options = SecureSocketOptions.Auto, CancellationToken cancellationToken = default (CancellationToken))
 		{
-			return ConnectAsync (stream, null, host, port, options, true, cancellationToken);
+			return ConnectAsync (stream, host, port, options, true, cancellationToken);
 		}
-#endif
 
 		/// <summary>
 		/// Asynchronously disconnect the service.

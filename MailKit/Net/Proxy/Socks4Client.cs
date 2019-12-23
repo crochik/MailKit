@@ -44,10 +44,10 @@ namespace MailKit.Net.Proxy
 		static readonly byte[] InvalidIPAddress = { 0, 0, 0, 1 };
 
 		/// <summary>
-		/// Initializes a new instance of the <see cref="T:MailKit.Net.Socks4Client"/> class.
+		/// Initializes a new instance of the <see cref="T:MailKit.Net.Proxy.Socks4Client"/> class.
 		/// </summary>
 		/// <remarks>
-		/// Initializes a new instance of the <see cref="T:MailKit.Net.Socks4Client"/> class.
+		/// Initializes a new instance of the <see cref="T:MailKit.Net.Proxy.Socks4Client"/> class.
 		/// </remarks>
 		/// <param name="host">The host name of the proxy server.</param>
 		/// <param name="port">The proxy server port.</param>
@@ -67,10 +67,10 @@ namespace MailKit.Net.Proxy
 		}
 
 		/// <summary>
-		/// Initializes a new instance of the <see cref="T:MailKit.Net.Socks4Client"/> class.
+		/// Initializes a new instance of the <see cref="T:MailKit.Net.Proxy.Socks4Client"/> class.
 		/// </summary>
 		/// <remarks>
-		/// Initializes a new instance of the <see cref="T:MailKit.Net.Socks4Client"/> class.
+		/// Initializes a new instance of the <see cref="T:MailKit.Net.Proxy.Socks4Client"/> class.
 		/// </remarks>
 		/// <param name="host">The host name of the proxy server.</param>
 		/// <param name="port">The proxy server port.</param>
@@ -132,7 +132,7 @@ namespace MailKit.Net.Proxy
 			if (doAsync) {
 				ipAddresses = await Dns.GetHostAddressesAsync (host).ConfigureAwait (false);
 			} else {
-#if NETSTANDARD
+#if NETSTANDARD1_3 || NETSTANDARD1_6
 				ipAddresses = Dns.GetHostAddressesAsync (host).GetAwaiter ().GetResult ();
 #else
 				ipAddresses = Dns.GetHostAddresses (host);
@@ -220,7 +220,7 @@ namespace MailKit.Net.Proxy
 
 				return socket;
 			} catch {
-#if NETSTANDARD_2_0 || NET_4_5 || __MOBILE__
+#if !NETSTANDARD1_3 && !NETSTANDARD1_6
 				if (socket.Connected)
 					socket.Disconnect (false);
 #endif

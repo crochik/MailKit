@@ -25,25 +25,19 @@
 //
 
 using System;
+using System.IO;
 using System.Net;
 using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
-using System.Collections.Generic;
-
-#if !NETFX_CORE
-using System.IO;
 using System.Net.Sockets;
 using System.Net.Security;
+using System.Threading.Tasks;
+using System.Collections.Generic;
 using System.Security.Cryptography.X509Certificates;
 using SslProtocols = System.Security.Authentication.SslProtocols;
 
 using MailKit.Net;
 using MailKit.Net.Proxy;
-#else
-using Encoding = Portable.Text.Encoding;
-#endif
-
 using MailKit.Security;
 
 namespace MailKit {
@@ -55,10 +49,10 @@ namespace MailKit {
 	/// </remarks>
 	public abstract class MailService : IMailService
 	{
-#if NET_4_5 || __MOBILE__ || NETSTANDARD
-		const SslProtocols DefaultSslProtocols = SslProtocols.Tls | SslProtocols.Tls11 | SslProtocols.Tls12;
-#elif !NETFX_CORE
-		const SslProtocols DefaultSslProtocols = SslProtocols.Tls;
+#if NET48
+		const SslProtocols DefaultSslProtocols = SslProtocols.Tls11 | SslProtocols.Tls12 | SslProtocols.Tls13;
+#else
+		const SslProtocols DefaultSslProtocols = SslProtocols.Tls11 | SslProtocols.Tls12;
 #endif
 
 		/// <summary>
@@ -76,10 +70,8 @@ namespace MailKit {
 			if (protocolLogger == null)
 				throw new ArgumentNullException (nameof (protocolLogger));
 
-#if !NETFX_CORE
 			SslProtocols = DefaultSslProtocols;
 			CheckCertificateRevocation = true;
-#endif
 			ProtocolLogger = protocolLogger;
 		}
 
@@ -139,14 +131,13 @@ namespace MailKit {
 			get; private set;
 		}
 
-#if !NETFX_CORE
 		/// <summary>
 		/// Gets or sets the SSL and TLS protocol versions that the client is allowed to use.
 		/// </summary>
 		/// <remarks>
 		/// <para>Gets or sets the SSL and TLS protocol versions that the client is allowed to use.</para>
-		/// <para>By default, MailKit initializes this value to support only TLS v1.0 and greater and
-		/// does not support any version of SSL due to those protocols no longer being considered
+		/// <para>By default, MailKit initializes this value to support only TLS v1.1 and greater and
+		/// does not support TLS v1.0 or any version of SSL due to those protocols no longer being considered
 		/// secure.</para>
 		/// <para>This property should be set before calling any of the
 		/// <a href="Overload_MailKit_MailService_Connect.htm">Connect</a> methods.</para>
@@ -174,7 +165,16 @@ namespace MailKit {
 		/// Get or set whether connecting via SSL/TLS should check certificate revocation.
 		/// </summary>
 		/// <remarks>
-		/// Gets or sets whether connecting via SSL/TLS should check certificate revocation.
+		/// <para>Gets or sets whether connecting via SSL/TLS should check certificate revocation.</para>
+		/// <para>Normally, the value of this property should be set to <c>true</c> (the default) for security
+		/// reasons, but there are times when it may be necessary to set it to <c>false</c>.</para>
+		/// <para>For example, most Certificate Authorities are probably pretty good at keeping their CRL and/or
+		/// OCSP servers up 24/7, but occasionally they do go down or are otherwise unreachable due to other
+		/// network problems between the client and the Certificate Authority. When this happens, it becomes
+		/// impossible to check the revocation status of one or more of the certificates in the chain
+		/// resulting in an <see cref="SslHandshakeException"/> being thrown in the
+		/// <a href="Overload_MailKit_MailService_Connect.htm">Connect</a> method. If this becomes a problem,
+		/// it may become desirable to set <see cref="CheckCertificateRevocation"/> to <c>false</c>.</para>
 		/// </remarks>
 		/// <value><c>true</c> if certificate revocation should be checked; otherwise, <c>false</c>.</value>
 		public bool CheckCertificateRevocation {
@@ -219,7 +219,6 @@ namespace MailKit {
 		public IProxyClient ProxyClient {
 			get; set;
 		}
-#endif
 
 		/// <summary>
 		/// Gets the authentication mechanisms supported by the mail server.
@@ -288,7 +287,6 @@ namespace MailKit {
 			get; set;
 		}
 
-#if !NETFX_CORE
 		/// <summary>
 		/// The default server certificate validation callback used when connecting via SSL or TLS.
 		/// </summary>
@@ -310,11 +308,26 @@ namespace MailKit {
 			if (sslPolicyErrors == SslPolicyErrors.None)
 				return true;
 
-			// if there are errors in the certificate chain, look at each error to determine the cause
-			if ((sslPolicyErrors & SslPolicyErrors.RemoteCertificateChainErrors) != 0) {
-				if (chain != null && chain.ChainStatus != null) {
-					foreach (var status in chain.ChainStatus) {
-						if ((certificate.Subject == certificate.Issuer) && (status.Status == X509ChainStatusFlags.UntrustedRoot)) {
+			// If no remote certificate is available, we have no choice but to abort.
+			if ((sslPolicyErrors & SslPolicyErrors.RemoteCertificateNotAvailable) != 0)
+				return false;
+
+			// If there was a name mismatch, then it *may* be that the host name used in the certificate
+			// does not match the host name used by the client to connect. Unfortunately, we have no way
+			// of verifying if that is indeed the case or not. The user will have to do that themselves.
+			if ((sslPolicyErrors & SslPolicyErrors.RemoteCertificateNameMismatch) != 0)
+				return false;
+
+			// If we've gotten this far, then there were *only* errors in the certificate chain. Look at each error to determine the cause.
+			if (chain != null) {
+				foreach (var element in chain.ChainElements) {
+					if (element.Certificate != certificate)
+						continue;
+
+					var selfSigned = !string.IsNullOrEmpty (element.Certificate.Subject) && element.Certificate.Subject == certificate.Issuer;
+
+					foreach (var status in element.ChainElementStatus) {
+						if (selfSigned && status.Status == X509ChainStatusFlags.UntrustedRoot) {
 							// treat self-signed certificates with an untrusted root as valid since they are so
 							// common among mail server installations
 							continue;
@@ -326,12 +339,12 @@ namespace MailKit {
 							return false;
 						}
 					}
-				}
 
-				// Note: If we get this far, then the only errors in the certificate chain are untrusted root errors for
-				// self-signed certificates. Since self-signed certificates are so common for mail server installations,
-				// treat the certificate as valid.
-				return true;
+					// Note: If we get this far, then the only errors in the certificate chain are untrusted root errors for
+					// self-signed certificates. Since self-signed certificates are so common for mail server installations,
+					// treat the certificate as valid.
+					return true;
+				}
 			}
 
 			return false;
@@ -350,7 +363,6 @@ namespace MailKit {
 
 			return await SocketUtils.ConnectAsync (host, port, LocalEndPoint, Timeout, doAsync, cancellationToken).ConfigureAwait (false);
 		}
-#endif
 
 		/// <summary>
 		/// Establish a connection to the specified mail server.
@@ -434,7 +446,6 @@ namespace MailKit {
 		/// </exception>
 		public abstract Task ConnectAsync (string host, int port = 0, SecureSocketOptions options = SecureSocketOptions.Auto, CancellationToken cancellationToken = default (CancellationToken));
 
-#if !NETFX_CORE
 		/// <summary>
 		/// Establish a connection to the specified mail server using the provided socket.
 		/// </summary>
@@ -604,7 +615,6 @@ namespace MailKit {
 		/// The server responded with an unexpected token.
 		/// </exception>
 		public abstract Task ConnectAsync (Stream stream, string host, int port = 0, SecureSocketOptions options = SecureSocketOptions.Auto, CancellationToken cancellationToken = default (CancellationToken));
-#endif
 
 		internal SecureSocketOptions GetSecureSocketOptions (Uri uri)
 		{

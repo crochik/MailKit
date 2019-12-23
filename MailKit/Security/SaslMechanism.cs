@@ -27,11 +27,10 @@
 using System;
 using System.Net;
 using System.Text;
-
-#if NETFX_CORE
-using Encoding = Portable.Text.Encoding;
-#else
 using System.Security.Cryptography;
+
+#if NETSTANDARD1_3 || NETSTANDARD1_6
+using MD5 = MimeKit.Cryptography.MD5;
 #endif
 
 namespace MailKit.Security {
@@ -56,6 +55,17 @@ namespace MailKit.Security {
 		public static readonly string[] AuthMechanismRank = {
 			"SCRAM-SHA-256", "SCRAM-SHA-1", "CRAM-MD5", "DIGEST-MD5", "PLAIN", "LOGIN"
 		};
+		static readonly bool md5supported;
+
+		static SaslMechanism ()
+		{
+			try {
+				using (var md5 = MD5.Create ())
+					md5supported = true;
+			} catch {
+				md5supported = false;
+			}
+		}
 
 		/// <summary>
 		/// Initializes a new instance of the <see cref="MailKit.Security.SaslMechanism"/> class.
@@ -279,8 +289,8 @@ namespace MailKit.Security {
 
 			var challenge = Challenge (decoded, 0, length);
 
-			if (challenge == null)
-				return null;
+			if (challenge == null || challenge.Length == 0)
+				return string.Empty;
 
 			return Convert.ToBase64String (challenge);
 		}
@@ -316,8 +326,8 @@ namespace MailKit.Security {
 			switch (mechanism) {
 			case "SCRAM-SHA-256": return true;
 			case "SCRAM-SHA-1":   return true;
-			case "DIGEST-MD5":    return true;
-			case "CRAM-MD5":      return true;
+			case "DIGEST-MD5":    return md5supported;
+			case "CRAM-MD5":      return md5supported;
 			case "XOAUTH2":       return true;
 			case "PLAIN":         return true;
 			case "LOGIN":         return true;
@@ -367,8 +377,8 @@ namespace MailKit.Security {
 			//case "KERBEROS_V4":   return null;
 			case "SCRAM-SHA-256": return new SaslMechanismScramSha256 (cred) { Uri = uri };
 			case "SCRAM-SHA-1":   return new SaslMechanismScramSha1 (cred) { Uri = uri };
-			case "DIGEST-MD5":    return new SaslMechanismDigestMd5 (cred) { Uri = uri };
-			case "CRAM-MD5":      return new SaslMechanismCramMd5 (cred) { Uri = uri };
+			case "DIGEST-MD5":    return md5supported ? new SaslMechanismDigestMd5 (cred) { Uri = uri } : null;
+			case "CRAM-MD5":      return md5supported ? new SaslMechanismCramMd5 (cred) { Uri = uri } : null;
 			//case "GSSAPI":        return null;
 			case "XOAUTH2":       return new SaslMechanismOAuth2 (cred) { Uri = uri };
 			case "PLAIN":         return new SaslMechanismPlain (encoding, cred) { Uri = uri };
@@ -572,7 +582,7 @@ namespace MailKit.Security {
 				}
 			}
 
-#if !NETFX_CORE && !NETSTANDARD
+#if !NETSTANDARD1_3 && !NETSTANDARD1_6
 			return builder.ToString ().Normalize (NormalizationForm.FormKC);
 #else
 			return builder.ToString ();

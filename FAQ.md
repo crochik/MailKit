@@ -4,9 +4,8 @@
 
 ### General
 * [Are MimeKit and MailKit completely free? Can I use them in my proprietary product(s)?](#CompletelyFree)
-* [Why do I get `The remote certificate is invalid according to the validation procedure` when I try to Connect?](#InvalidSslCertificate)
+* [Why do I get `"MailKit.Security.SslHandshakeException: An error occurred while attempting to establish an SSL or TLS connection."` when I try to Connect?](#SslHandshakeException)
 * [How can I get a protocol log for IMAP, POP3, or SMTP to see what is going wrong?](#ProtocolLog)
-* [How can I cancel the Connect() or ConnectAsync() methods or override the timeout?](#CancelConnect)
 * [Why doesn't MailKit find some of my GMail POP3 or IMAP messages?](#GMailHiddenMessages)
 * [How can I access GMail using MailKit?](#GMailAccess)
 * [How can I log in to a GMail account using OAuth 2.0?](#GMailOAuth2)
@@ -47,7 +46,7 @@
 Yes. MimeKit and MailKit are both completely free and open source. They are both covered under the
 [MIT](https://opensource.org/licenses/MIT) license.
 
-### <a name="InvalidSslCertificate">Q: Why do I get `The remote certificate is invalid according to the validation procedure` when I try to Connect?</a>
+### <a name="SslHandshakeException">Q: Why do I get `"MailKit.Security.SslHandshakeException: An error occurred while attempting to establish an SSL or TLS connection."` when I try to Connect?</a>
 
 When you get an exception with that error message, it usually means that you are encountering
 one of the following scenarios:
@@ -97,7 +96,7 @@ You can work around this problem by supplying a custom [RemoteCertificateValidat
 and setting it on the client's [ServerCertificateValidationCallback](http://mimekit.net/docs/html/P_MailKit_MailService_ServerCertificateValidationCallback.htm)
 property.
 
-In the most simplest example, you could do something like this (although I would strongly recommend against it in
+In the simplest example, you could do something like this (although I would strongly recommend against it in
 production use):
 
 ```csharp
@@ -115,6 +114,51 @@ property to a known value that you have verified at a prior date.
 
 You could also use this callback to prompt the user (much like you have probably seen web browsers do)
 as to whether or not the certificate should be trusted.
+
+#### 3. A Certificate Authority CRL server for one or more of the certificates in the chain is temporarily unavailable.
+
+Most Certificate Authorities are probably pretty good at keeping their CRL and/or OCSP servers up 24/7, but occasionally
+they *do* go down or are otherwise unreachable due to other network problems between you and the server. When this happens,
+it becomes impossible to check the revocation status of one or more of the certificates in the chain.
+
+To ignore revocation checks, you can set the
+[CheckCertificateRevocation](http://www.mimekit.net/docs/html/P_MailKit_IMailService_CheckCertificateRevocation.htm)
+property of the IMAP, POP3 or SMTP client to `false` before you connect:
+
+```csharp
+using (var client = new SmtpClient ()) {
+    client.CheckCertificateRevocation = false;
+
+    client.Connect (hostName, port, SecureSocketOptions.Auto);
+
+    // ...
+}
+```
+
+#### 4. The server does not support the same set of SSL/TLS protocols that the client is configured to use.
+
+MailKit attempts to keep up with the latest security recommendations and so is continuously removing older SSL and TLS
+protocols that are no longer considered secure from the default configuration. This often means that MailKit's SMTP,
+POP3 and IMAP clients will fail to connect to servers that are still using older SSL and TLS protocols. Currently,
+the SSL and TLS protocols that are not supported by default are: SSL v2.0, SSL v3.0, and TLS v1.0.
+
+You can override MailKit's default set of supported
+[SSL and TLS protocols](https://docs.microsoft.com/en-us/dotnet/api/system.security.authentication.sslprotocols?view=netframework-4.8)
+by setting the value of the [SslProtocols](http://www.mimekit.net/docs/html/P_MailKit_MailService_SslProtocols.htm)
+property on your SMTP, POP3 or IMAP client.
+
+For example:
+
+```csharp
+using (var client = new SmtpClient ()) {
+    // Allow SSLv3.0 and all versions of TLS
+    client.SslProtocols = SslProtocols.Ssl3 | SslProtocols.Tls | SslProtocols.Tls11 | SslProtocols.Tls12 | SslProtocols.Tls13;
+    
+    client.Connect ("smtp.gmail.com", 465, true);
+    
+    // ...
+}
+```
 
 ### <a name="ProtocolLog">Q: How can I get a protocol log for IMAP, POP3, or SMTP to see what is going wrong?</a>
 
@@ -139,43 +183,6 @@ information including your authentication credentials. This information will gen
 encoded blob immediately following an `AUTHENTICATE` or `AUTH` command (depending on the type of server).
 The only exception to this case is if you are authenticating with `NTLM` in which case I *may* need this
 information, but *only if* the bug/error is in the authentication step.
-
-### <a name="CancelConnect">Q: How can I cancel the Connect() or ConnectAsync() methods or override the timeout?</a>
-
-One of the limitations in MailKit is that the `SmtpClient`, `Pop3Client` and `ImapClient` `Connect()`/`ConnectAsync()`
-methods cannot be interrupted while the underlying socket is connecting. Cancelling the `CancellationToken` and/or
-overriding the client `Timeout` property will not work.
-
-Sadly, this is because `System.Net.Sockets.Socket`'s `Connect()` method does not respect the timeout values and there
-is no `ConnectAsync()` method that takes a `CancellationToken` argument.
-
-Luckily, each of MailKit's client implementations *does* provide `Connect()` and `ConnectAsync()` methods that take
-an existing `Socket` argument that has already been connected.
-
-To interrupt a socket connecting to a remote host using a `CancellationToken`, you could do this:
-
-```csharp
-static Task ConnectAsync (Socket socket, string host, int port, CancellationToken cancellationToken)
-{
-	var completion = new TaskCompletionSource<bool> ();
-	
-	socket.BeginConnect (host, port, result => {
-		try {
-			socket.EndConnect (result);
-			completion.TrySetResult (true);
-		} catch (Exception ex) {
-			completion.TrySetException (ex);
-		}
-	}, null);
-
-	cancellationToken.Register (() => {
-		completion.SetException (new OperationCanceledException ());
-		socket.Close ();
-	});
-	
-	return completion.Task;
-}
-```
 
 ### <a name="GMailHiddenMessages">Q: Why doesn't MailKit find some of my GMail POP3 or IMAP messages?</a>
 
@@ -229,7 +236,7 @@ var credential = new ServiceAccountCredential (new ServiceAccountCredential
     .Initializer ("your-developer-id@developer.gserviceaccount.com") {
     // Note: other scopes can be found here: https://developers.google.com/gmail/api/auth/scopes
     Scopes = new[] { "https://mail.google.com/" },
-    User = "user@gmail.com"
+    User = "user@gmail.com" // this is the user's GMail account email address
 }.FromCertificate (certificate));
 
 bool result = await credential.RequestAccessTokenAsync (CancellationToken.None);
@@ -1423,7 +1430,7 @@ If you get this exception, it's probably because you thought you had to open the
 passed as an argument to one of the
 [CopyTo](http://www.mimekit.net/docs/html/Overload_MailKit_MailFolder_CopyTo.htm) or
 [MoveTo](http://www.mimekit.net/docs/html/Overload_MailKit_MailFolder_MoveTo.htm) methods. When you opened
-that destination folder, you also inadvertantly closed the source folder which is why you are getting this
+that destination folder, you also inadvertently closed the source folder which is why you are getting this
 exception.
 
 The IMAP server can only have a single folder open at a time. Whenever you open a folder, you automatically
@@ -1584,22 +1591,54 @@ specified pickup directory location using a randomly generated filename based on
 like this:
 
 ```csharp
-void SendToPickupDirectory (MimeMessage message, string pickupDirectory)
+public static void SaveToPickupDirectory (MimeMessage message, string pickupDirectory)
 {
     do {
+        // Generate a random file name to save the message to.
         var path = Path.Combine (pickupDirectory, Guid.NewGuid ().ToString () + ".eml");
-
-        if (File.Exists (path))
-            continue;
+        Stream stream;
 
         try {
-            using (var stream = new FileStream (path, FileMode.CreateNew)) {
-                message.WriteTo (stream);
-                return;
-            }
+            // Attempt to create the new file.
+            stream = File.Open (path, FileMode.CreateNew);
         } catch (IOException) {
-            // The file may have been created between our File.Exists() check and
-            // our attempt to create the stream.
+	    // If the file already exists, try again with a new Guid.
+            if (File.Exists (path))
+                continue;
+
+            // Otherwise, fail immediately since it probably means that there is
+            // no graceful way to recover from this error.
+            throw;
+        }
+
+        try {
+            using (stream) {
+                // IIS pickup directories expect the message to be "byte-stuffed"
+                // which means that lines beginning with "." need to be escaped
+                // by adding an extra "." to the beginning of the line.
+                //
+                // Use an SmtpDataFilter "byte-stuff" the message as it is written
+                // to the file stream. This is the same process that an SmtpClient
+                // would use when sending the message in a `DATA` command.
+                using (var filtered = new FilteredStream (stream)) {
+                    filtered.Add (new SmtpDataFilter ());
+
+                    // Make sure to write the message in DOS (<CR><LF>) format.
+                    var options = FormatOptions.Default.Clone ();
+                    options.NewLineFormat = NewLineFormat.Dos;
+
+                    message.WriteTo (options, filtered);
+                    filtered.Flush ();
+                    return;
+                }
+            }
+        } catch {
+            // An exception here probably means that the disk is full.
+            //
+            // Delete the file that was created above so that incomplete files are not
+            // left behind for IIS to send accidentally.
+            File.Delete (path);
+            throw;
         }
     } while (true);
 }

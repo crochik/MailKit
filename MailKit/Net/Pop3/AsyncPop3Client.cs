@@ -29,16 +29,9 @@ using System.IO;
 using System.Net;
 using System.Text;
 using System.Threading;
+using System.Net.Sockets;
 using System.Threading.Tasks;
 using System.Collections.Generic;
-
-#if NETFX_CORE
-using Windows.Networking;
-using Windows.Networking.Sockets;
-using Encoding = Portable.Text.Encoding;
-#else
-using System.Net.Sockets;
-#endif
 
 using MimeKit;
 
@@ -227,7 +220,6 @@ namespace MailKit.Net.Pop3
 			return ConnectAsync (host, port, options, true, cancellationToken);
 		}
 
-#if !NETFX_CORE
 		/// <summary>
 		/// Asynchronously establish a connection to the specified POP3 or POP3/S server using the provided socket.
 		/// </summary>
@@ -363,9 +355,8 @@ namespace MailKit.Net.Pop3
 		/// </exception>
 		public override Task ConnectAsync (Stream stream, string host, int port = 0, SecureSocketOptions options = SecureSocketOptions.Auto, CancellationToken cancellationToken = default (CancellationToken))
 		{
-			return ConnectAsync (stream, null, host, port, options, true, cancellationToken);
+			return ConnectAsync (stream, host, port, options, true, cancellationToken);
 		}
-#endif
 
 		/// <summary>
 		/// Asynchronously disconnect the service.
@@ -416,7 +407,7 @@ namespace MailKit.Net.Pop3
 		/// <exception cref="Pop3ProtocolException">
 		/// A POP3 protocol error occurred.
 		/// </exception>
-		public async Task<int> GetMessageCountAsync (CancellationToken cancellationToken = default (CancellationToken))
+		public override async Task<int> GetMessageCountAsync (CancellationToken cancellationToken = default (CancellationToken))
 		{
 			CheckDisposed ();
 			CheckConnected ();
@@ -1474,6 +1465,7 @@ namespace MailKit.Net.Pop3
 		/// is cleanly disconnected
 		/// (see <see cref="Pop3Client.Disconnect(bool, CancellationToken)"/>).
 		/// </remarks>
+		/// <returns>An awaitable task.</returns>
 		/// <param name="cancellationToken">The cancellation token.</param>
 		/// <exception cref="System.ObjectDisposedException">
 		/// The <see cref="Pop3Client"/> has been disposed.

@@ -27,33 +27,24 @@
 using System;
 using System.IO;
 using System.Net;
-using System.Linq;
 using System.Text;
 using System.Threading;
+using System.Net.Sockets;
+using System.Net.Security;
 using System.Globalization;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
-
-#if NETFX_CORE
-using Windows.Networking;
-using Windows.Networking.Sockets;
-using Windows.Storage.Streams;
-using Encoding = Portable.Text.Encoding;
-using MD5 = MimeKit.Cryptography.MD5;
-#else
-using System.Net.Sockets;
-using System.Net.Security;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
-
-using NetworkStream = MailKit.Net.NetworkStream;
-#endif
 
 using MimeKit;
 using MimeKit.IO;
 
 using MailKit.Security;
+
+using SslStream = MailKit.Net.SslStream;
+using NetworkStream = MailKit.Net.NetworkStream;
 
 namespace MailKit.Net.Pop3 {
 	/// <summary>
@@ -68,7 +59,7 @@ namespace MailKit.Net.Pop3 {
 	/// <example>
 	/// <code language="c#" source="Examples\Pop3Examples.cs" region="DownloadMessages"/>
 	/// </example>
-	public partial class Pop3Client : MailSpool
+	public partial class Pop3Client : MailSpool, IPop3Client
 	{
 		[Flags]
 		enum ProbedCapabilities : byte {
@@ -80,9 +71,6 @@ namespace MailKit.Net.Pop3 {
 		readonly MimeParser parser = new MimeParser (Stream.Null);
 		readonly Pop3Engine engine;
 		ProbedCapabilities probed;
-#if NETFX_CORE
-		StreamSocket socket;
-#endif
 		bool disposed, disconnecting, secure, utf8;
 		int timeout = 2 * 60 * 1000;
 		long octets;
@@ -235,20 +223,18 @@ namespace MailKit.Net.Pop3 {
 				throw new ServiceNotAuthenticatedException ("The Pop3Client has not been authenticated.");
 		}
 
-#if !NETFX_CORE
 		bool ValidateRemoteCertificate (object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors sslPolicyErrors)
 		{
 			if (ServerCertificateValidationCallback != null)
 				return ServerCertificateValidationCallback (engine.Uri.Host, certificate, chain, sslPolicyErrors);
 
-#if !NETSTANDARD
+#if !NETSTANDARD1_3 && !NETSTANDARD1_6
 			if (ServicePointManager.ServerCertificateValidationCallback != null)
 				return ServicePointManager.ServerCertificateValidationCallback (engine.Uri.Host, certificate, chain, sslPolicyErrors);
 #endif
 
-			return DefaultServerCertificateValidationCallback (sender, certificate, chain, sslPolicyErrors);
+			return DefaultServerCertificateValidationCallback (engine.Uri.Host, certificate, chain, sslPolicyErrors);
 		}
-#endif
 
 		static Exception CreatePop3Exception (Pop3Command pc)
 		{
@@ -419,17 +405,17 @@ namespace MailKit.Net.Pop3 {
 				var tokens = text.Split (new [] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
 
 				if (tokens.Length < 2) {
-					cmd.Exception = CreatePop3ParseException ("Pop3 server returned an incomplete response to the STAT command.");
+					cmd.Exception = CreatePop3ParseException ("Pop3 server returned an incomplete response to the STAT command: {0}", text);
 					return Task.FromResult (false);
 				}
 
 				if (!int.TryParse (tokens[0], NumberStyles.None, CultureInfo.InvariantCulture, out total) || total < 0) {
-					cmd.Exception = CreatePop3ParseException ("Pop3 server returned an invalid response to the STAT command.");
+					cmd.Exception = CreatePop3ParseException ("Pop3 server returned an invalid response to the STAT command: {0}", text);
 					return Task.FromResult (false);
 				}
 
-				if (!long.TryParse (tokens[1], NumberStyles.None, CultureInfo.InvariantCulture, out octets) || octets < 0) {
-					cmd.Exception = CreatePop3ParseException ("Pop3 server returned an invalid response to the STAT command.");
+				if (!long.TryParse (tokens[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out octets)) {
+					cmd.Exception = CreatePop3ParseException ("Pop3 server returned an invalid response to the STAT command: {0}", text);
 					return Task.FromResult (false);
 				}
 
@@ -668,7 +654,7 @@ namespace MailKit.Net.Pop3 {
 					await QueryCapabilitiesAsync (doAsync, cancellationToken).ConfigureAwait (false);
 					await UpdateMessageCountAsync (doAsync, cancellationToken).ConfigureAwait (false);
 					await ProbeCapabilitiesAsync (doAsync, cancellationToken).ConfigureAwait (false);
-					OnAuthenticated (message);
+					OnAuthenticated (message ?? string.Empty);
 					return;
 				}
 			}
@@ -802,7 +788,7 @@ namespace MailKit.Net.Pop3 {
 			secure = false;
 
 			engine.Uri = new Uri ($"pop://{host}:110");
-			engine.Connect (new Pop3Stream (replayStream, null, ProtocolLogger), cancellationToken);
+			engine.Connect (new Pop3Stream (replayStream, ProtocolLogger), cancellationToken);
 			engine.QueryCapabilities (cancellationToken);
 			engine.Disconnected += OnEngineDisconnected;
 			OnConnected (host, 110, SecureSocketOptions.None);
@@ -822,7 +808,7 @@ namespace MailKit.Net.Pop3 {
 			secure = false;
 
 			engine.Uri = new Uri ($"pop://{host}:110");
-			await engine.ConnectAsync (new Pop3Stream (replayStream, null, ProtocolLogger), cancellationToken).ConfigureAwait (false);
+			await engine.ConnectAsync (new Pop3Stream (replayStream, ProtocolLogger), cancellationToken).ConfigureAwait (false);
 			await engine.QueryCapabilitiesAsync (cancellationToken).ConfigureAwait (false);
 			engine.Disconnected += OnEngineDisconnected;
 			OnConnected (host, 110, SecureSocketOptions.None);
@@ -890,7 +876,6 @@ namespace MailKit.Net.Pop3 {
 
 			ComputeDefaultValues (host, ref port, ref options, out uri, out starttls);
 
-#if !NETFX_CORE
 			var socket = await ConnectSocket (host, port, doAsync, cancellationToken).ConfigureAwait (false);
 
 			engine.Uri = uri;
@@ -902,7 +887,7 @@ namespace MailKit.Net.Pop3 {
 					if (doAsync) {
 						await ssl.AuthenticateAsClientAsync (host, ClientCertificates, SslProtocols, CheckCertificateRevocation).ConfigureAwait (false);
 					} else {
-#if NETSTANDARD
+#if NETSTANDARD1_3 || NETSTANDARD1_6
 						ssl.AuthenticateAsClientAsync (host, ClientCertificates, SslProtocols, CheckCertificateRevocation).GetAwaiter ().GetResult ();
 #else
 						ssl.AuthenticateAsClient (host, ClientCertificates, SslProtocols, CheckCertificateRevocation);
@@ -920,30 +905,6 @@ namespace MailKit.Net.Pop3 {
 				stream = new NetworkStream (socket, true);
 				secure = false;
 			}
-#else
-			var protection = options == SecureSocketOptions.SslOnConnect ? SocketProtectionLevel.Tls12 : SocketProtectionLevel.PlainSocket;
-			var socket = new StreamSocket ();
-
-			try {
-				cancellationToken.ThrowIfCancellationRequested ();
-				if (doAsync)
-					await socket.ConnectAsync (new HostName (host), port.ToString (), protection).AsTask (cancellationToken).ConfigureAwait (false);
-				else
-					socket.ConnectAsync (new HostName (host), port.ToString (), protection).AsTask (cancellationToken).GetAwaiter ().GetResult ();
-			} catch (Exception ex) {
-				socket.Dispose ();
-				socket = null;
-
-				if (protection != SocketProtectionLevel.PlainSocket)
-					throw SslHandshakeException.Create (ex, false);
-
-				throw;
-			}
-
-			stream = new DuplexStream (socket.InputStream.AsStreamForRead (0), socket.OutputStream.AsStreamForWrite (0));
-			secure = options == SecureSocketOptions.SslOnConnect;
-			engine.Uri = uri;
-#endif
 
 			probed = ProbedCapabilities.None;
 			if (stream.CanTimeout) {
@@ -956,13 +917,10 @@ namespace MailKit.Net.Pop3 {
 			} catch {
 				stream.Dispose ();
 				secure = false;
-#if NETFX_CORE
-				socket = null;
-#endif
 				throw;
 			}
 
-			var pop3 = new Pop3Stream (stream, socket, ProtocolLogger);
+			var pop3 = new Pop3Stream (stream, ProtocolLogger);
 
 			if (doAsync)
 				await engine.ConnectAsync (pop3, cancellationToken).ConfigureAwait (false);
@@ -979,25 +937,18 @@ namespace MailKit.Net.Pop3 {
 					await SendCommandAsync (doAsync, cancellationToken, "STLS").ConfigureAwait (false);
 
 					try {
-#if !NETFX_CORE
 						var tls = new SslStream (stream, false, ValidateRemoteCertificate);
 						engine.Stream.Stream = tls;
 
 						if (doAsync) {
 							await tls.AuthenticateAsClientAsync (host, ClientCertificates, SslProtocols, CheckCertificateRevocation).ConfigureAwait (false);
 						} else {
-#if NETSTANDARD
+#if NETSTANDARD1_3 || NETSTANDARD1_6
 							tls.AuthenticateAsClientAsync (host, ClientCertificates, SslProtocols, CheckCertificateRevocation).GetAwaiter ().GetResult ();
 #else
 							tls.AuthenticateAsClient (host, ClientCertificates, SslProtocols, CheckCertificateRevocation);
 #endif
 						}
-#else
-						if (doAsync)
-							await socket.UpgradeToSslAsync (SocketProtectionLevel.Tls12, new HostName (host)).AsTask (cancellationToken).ConfigureAwait (false);
-						else
-							socket.UpgradeToSslAsync (SocketProtectionLevel.Tls12, new HostName (host)).AsTask (cancellationToken).GetAwaiter ().GetResult ();
-#endif
 					} catch (Exception ex) {
 						throw SslHandshakeException.Create (ex, true);
 					}
@@ -1086,8 +1037,7 @@ namespace MailKit.Net.Pop3 {
 			ConnectAsync (host, port, options, false, cancellationToken).GetAwaiter ().GetResult ();
 		}
 
-#if !NETFX_CORE
-		async Task ConnectAsync (Stream stream, Socket socket, string host, int port, SecureSocketOptions options, bool doAsync, CancellationToken cancellationToken)
+		async Task ConnectAsync (Stream stream, string host, int port, SecureSocketOptions options, bool doAsync, CancellationToken cancellationToken)
 		{
 			if (stream == null)
 				throw new ArgumentNullException (nameof (stream));
@@ -1121,7 +1071,7 @@ namespace MailKit.Net.Pop3 {
 					if (doAsync) {
 						await ssl.AuthenticateAsClientAsync (host, ClientCertificates, SslProtocols, CheckCertificateRevocation).ConfigureAwait (false);
 					} else {
-#if NETSTANDARD
+#if NETSTANDARD1_3 || NETSTANDARD1_6
 						ssl.AuthenticateAsClientAsync (host, ClientCertificates, SslProtocols, CheckCertificateRevocation).GetAwaiter ().GetResult ();
 #else
 						ssl.AuthenticateAsClient (host, ClientCertificates, SslProtocols, CheckCertificateRevocation);
@@ -1154,7 +1104,7 @@ namespace MailKit.Net.Pop3 {
 				throw;
 			}
 
-			var pop3 = new Pop3Stream (network, socket, ProtocolLogger);
+			var pop3 = new Pop3Stream (network, ProtocolLogger);
 
 			if (doAsync)
 				await engine.ConnectAsync (pop3, cancellationToken).ConfigureAwait (false);
@@ -1177,7 +1127,7 @@ namespace MailKit.Net.Pop3 {
 						if (doAsync) {
 							await tls.AuthenticateAsClientAsync (host, ClientCertificates, SslProtocols, CheckCertificateRevocation).ConfigureAwait (false);
 						} else {
-#if NETSTANDARD
+#if NETSTANDARD1_3 || NETSTANDARD1_6
 							tls.AuthenticateAsClientAsync (host, ClientCertificates, SslProtocols, CheckCertificateRevocation).GetAwaiter ().GetResult ();
 #else
 							tls.AuthenticateAsClient (host, ClientCertificates, SslProtocols, CheckCertificateRevocation);
@@ -1210,7 +1160,7 @@ namespace MailKit.Net.Pop3 {
 			if (!socket.Connected)
 				throw new ArgumentException ("The socket is not connected.", nameof (socket));
 
-			return ConnectAsync (new NetworkStream (socket, true), socket, host, port, options, doAsync, cancellationToken);
+			return ConnectAsync (new NetworkStream (socket, true), host, port, options, doAsync, cancellationToken);
 		}
 
 		/// <summary>
@@ -1346,9 +1296,8 @@ namespace MailKit.Net.Pop3 {
 		/// </exception>
 		public override void Connect (Stream stream, string host, int port = 0, SecureSocketOptions options = SecureSocketOptions.Auto, CancellationToken cancellationToken = default (CancellationToken))
 		{
-			ConnectAsync (stream, null, host, port, options, false, cancellationToken).GetAwaiter ().GetResult ();
+			ConnectAsync (stream, host, port, options, false, cancellationToken).GetAwaiter ().GetResult ();
 		}
-#endif
 
 		async Task DisconnectAsync (bool quit, bool doAsync, CancellationToken cancellationToken)
 		{
@@ -1366,11 +1315,6 @@ namespace MailKit.Net.Pop3 {
 				} catch (IOException) {
 				}
 			}
-
-#if NETFX_CORE
-			socket.Dispose ();
-			socket = null;
-#endif
 
 			disconnecting = true;
 			engine.Disconnect ();
@@ -1424,7 +1368,7 @@ namespace MailKit.Net.Pop3 {
 		/// <exception cref="Pop3ProtocolException">
 		/// A POP3 protocol error occurred.
 		/// </exception>
-		public int GetMessageCount (CancellationToken cancellationToken = default (CancellationToken))
+		public override int GetMessageCount (CancellationToken cancellationToken = default (CancellationToken))
 		{
 			CheckDisposed ();
 			CheckConnected ();
@@ -2055,17 +1999,17 @@ namespace MailKit.Net.Pop3 {
 				int id;
 
 				if (tokens.Length < 2) {
-					pc.Exception = CreatePop3ParseException ("Pop3 server returned an incomplete response to the LIST command.");
+					pc.Exception = CreatePop3ParseException ("Pop3 server returned an incomplete response to the LIST command: {0}", text);
 					return Task.FromResult (true);
 				}
 
 				if (!int.TryParse (tokens[0], NumberStyles.None, CultureInfo.InvariantCulture, out id) || id != seqid) {
-					pc.Exception = CreatePop3ParseException ("Pop3 server returned an unexpected response to the LIST command.");
+					pc.Exception = CreatePop3ParseException ("Pop3 server returned an unexpected sequence-id token to the LIST command: {0}", tokens[0]);
 					return Task.FromResult (true);
 				}
 
 				if (!int.TryParse (tokens[1], NumberStyles.None, CultureInfo.InvariantCulture, out size) || size < 0) {
-					pc.Exception = CreatePop3ParseException ("Pop3 server returned an unexpected size token to the LIST command.");
+					pc.Exception = CreatePop3ParseException ("Pop3 server returned an unexpected size token to the LIST command: {0}", tokens[1]);
 					return Task.FromResult (true);
 				}
 
@@ -2184,17 +2128,17 @@ namespace MailKit.Net.Pop3 {
 					int seqid, size;
 
 					if (tokens.Length < 2) {
-						pc.Exception = CreatePop3ParseException ("Pop3 server returned an incomplete response to the LIST command.");
+						pc.Exception = CreatePop3ParseException ("Pop3 server returned an incomplete response to the LIST command: {0}", response);
 						continue;
 					}
 
 					if (!int.TryParse (tokens[0], NumberStyles.None, CultureInfo.InvariantCulture, out seqid) || seqid != sizes.Count + 1) {
-						pc.Exception = CreatePop3ParseException ("Pop3 server returned an unexpected response to the LIST command.");
+						pc.Exception = CreatePop3ParseException ("Pop3 server returned an unexpected sequence-id token to the LIST command: {0}", tokens[0]);
 						continue;
 					}
 
 					if (!int.TryParse (tokens[1], NumberStyles.None, CultureInfo.InvariantCulture, out size) || size < 0) {
-						pc.Exception = CreatePop3ParseException ("Pop3 server returned an unexpected size token to the LIST command.");
+						pc.Exception = CreatePop3ParseException ("Pop3 server returned an unexpected size token to the LIST command: {0}", tokens[1]);
 						continue;
 					}
 
@@ -3448,12 +3392,6 @@ namespace MailKit.Net.Pop3 {
 		{
 			if (disposing && !disposed) {
 				engine.Disconnect ();
-
-#if NETFX_CORE
-				if (socket != null)
-					socket.Dispose ();
-#endif
-
 				disposed = true;
 			}
 

@@ -191,7 +191,7 @@ namespace UnitTests.Net.Imap {
 			const string text = "(atom-label \\flag-label \"quoted-label\" NIL)\r\n";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						IList<string> labels;
 
@@ -217,7 +217,7 @@ namespace UnitTests.Net.Imap {
 			const string text = "(\"TEXT\" \"PLAIN\" (\"CHARSET\" \"US-ASCII\") NIL NIL \"7BIT\" 3028 92)\r\n";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						BodyPartText basic;
 						BodyPart body;
@@ -255,7 +255,7 @@ namespace UnitTests.Net.Imap {
 			const string text = "(\"Wed, 17 Jul 1996 02:23:25 -0700 (PDT)\" \"IMAP4rev1 WG mtg summary and minutes\" ((\"Terry Gray\" NIL \"gray\" \"cac.washington.edu\")) ((\"Terry Gray\" NIL \"gray\" \"cac.washington.edu\")) ((\"Terry Gray\" NIL \"gray\" \"cac.washington.edu\")) ((NIL NIL \"imap\" \"cac.washington.edu\")) ((NIL NIL \"minutes\" \"CNRI.Reston.VA.US\") (\"John Klensin\" NIL \"KLENSIN\" \"MIT.EDU\")) NIL NIL \"<B27397-0100000@cac.washington.edu>\")\r\n";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						Envelope envelope;
 
@@ -306,7 +306,7 @@ namespace UnitTests.Net.Imap {
 			const string text = "({37}\r\nWed, 17 Jul 1996 02:23:25 -0700 (PDT) {36}\r\nIMAP4rev1 WG mtg summary and minutes (({10}\r\nTerry Gray NIL {4}\r\ngray \"cac.washington.edu\")) ((\"Terry Gray\" NIL \"gray\" \"cac.washington.edu\")) ((\"Terry Gray\" NIL \"gray\" \"cac.washington.edu\")) ((NIL NIL \"imap\" \"cac.washington.edu\")) ((NIL NIL \"minutes\" \"CNRI.Reston.VA.US\") (\"John Klensin\" NIL \"KLENSIN\" \"MIT.EDU\")) NIL NIL {35}\r\n<B27397-0100000@cac.washington.edu>)\r\n";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						Envelope envelope;
 
@@ -351,13 +351,108 @@ namespace UnitTests.Net.Imap {
 			}
 		}
 
+		// This tests the work-around for issue #669
+		[Test]
+		public void TestParseEnvelopeWithMissingMessageId ()
+		{
+			const string text = "(\"Tue, 24 Sep 2019 09:48:05 +0800\" \"subject\" ((\"From Name\" NIL \"from\" \"example.com\")) ((\"Sender Name\" NIL \"sender\" \"example.com\")) ((\"Reply-To Name\" NIL \"reply-to\" \"example.com\")) NIL NIL NIL \"<in-reply-to@example.com>\")\r\n";
+
+			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
+					using (var engine = new ImapEngine (null)) {
+						Envelope envelope;
+
+						engine.SetStream (tokenizer);
+
+						try {
+							envelope = ImapUtils.ParseEnvelopeAsync (engine, false, CancellationToken.None).GetAwaiter ().GetResult ();
+						} catch (Exception ex) {
+							Assert.Fail ("Parsing ENVELOPE failed: {0}", ex);
+							return;
+						}
+
+						var token = engine.ReadToken (CancellationToken.None);
+						Assert.AreEqual (ImapTokenType.Eoln, token.Type, "Expected new-line, but got: {0}", token);
+
+						Assert.IsTrue (envelope.Date.HasValue, "Parsed ENVELOPE date is null.");
+						Assert.AreEqual ("Tue, 24 Sep 2019 09:48:05 +0800", DateUtils.FormatDate (envelope.Date.Value), "Date does not match.");
+						Assert.AreEqual ("subject", envelope.Subject, "Subject does not match.");
+
+						Assert.AreEqual (1, envelope.From.Count, "From counts do not match.");
+						Assert.AreEqual ("\"From Name\" <from@example.com>", envelope.From.ToString (), "From does not match.");
+
+						Assert.AreEqual (1, envelope.Sender.Count, "Sender counts do not match.");
+						Assert.AreEqual ("\"Sender Name\" <sender@example.com>", envelope.Sender.ToString (), "Sender does not match.");
+
+						Assert.AreEqual (1, envelope.ReplyTo.Count, "Reply-To counts do not match.");
+						Assert.AreEqual ("\"Reply-To Name\" <reply-to@example.com>", envelope.ReplyTo.ToString (), "Reply-To does not match.");
+
+						Assert.AreEqual (0, envelope.To.Count, "To counts do not match.");
+						Assert.AreEqual (0, envelope.Cc.Count, "Cc counts do not match.");
+						Assert.AreEqual (0, envelope.Bcc.Count, "Bcc counts do not match.");
+
+						Assert.AreEqual ("in-reply-to@example.com", envelope.InReplyTo, "In-Reply-To does not match.");
+
+						Assert.IsNull (envelope.MessageId, "Message-Id is not null.");
+					}
+				}
+			}
+		}
+
+		// This tests the work-around for issue #932
+		[Test]
+		public void TestParseEnvelopeWithMissingInReplyTo ()
+		{
+			const string text = "(\"Tue, 24 Sep 2019 09:48:05 +0800\" \"=?GBK?B?sbG+qdW9x/jI1bGose0=?=\" ((\"=?GBK?B?yv2+3bfWzvbQodfp?=\" NIL \"unkonwn-name\" \"unknown-domain\")) ((\"=?GBK?B?yv2+3bfWzvbQodfp?=\" NIL \"unkonwn-name\" \"unknown-domain\")) ((\"=?GBK?B?yv2+3bfWzvbQodfp?=\" NIL \"unkonwn-name\" \"unknown-domain\")) NIL NIL NIL)\r\n";
+
+			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
+					using (var engine = new ImapEngine (null)) {
+						Envelope envelope;
+
+						engine.SetStream (tokenizer);
+
+						try {
+							envelope = ImapUtils.ParseEnvelopeAsync (engine, false, CancellationToken.None).GetAwaiter ().GetResult ();
+						} catch (Exception ex) {
+							Assert.Fail ("Parsing ENVELOPE failed: {0}", ex);
+							return;
+						}
+
+						var token = engine.ReadToken (CancellationToken.None);
+						Assert.AreEqual (ImapTokenType.Eoln, token.Type, "Expected new-line, but got: {0}", token);
+
+						Assert.IsTrue (envelope.Date.HasValue, "Parsed ENVELOPE date is null.");
+						Assert.AreEqual ("Tue, 24 Sep 2019 09:48:05 +0800", DateUtils.FormatDate (envelope.Date.Value), "Date does not match.");
+						Assert.AreEqual ("北京战区日报表", envelope.Subject, "Subject does not match.");
+
+						Assert.AreEqual (1, envelope.From.Count, "From counts do not match.");
+						Assert.AreEqual ("\"数据分析小组\" <unkonwn-name@unknown-domain>", envelope.From.ToString (), "From does not match.");
+
+						Assert.AreEqual (1, envelope.Sender.Count, "Sender counts do not match.");
+						Assert.AreEqual ("\"数据分析小组\" <unkonwn-name@unknown-domain>", envelope.Sender.ToString (), "Sender does not match.");
+
+						Assert.AreEqual (1, envelope.ReplyTo.Count, "Reply-To counts do not match.");
+						Assert.AreEqual ("\"数据分析小组\" <unkonwn-name@unknown-domain>", envelope.ReplyTo.ToString (), "Reply-To does not match.");
+
+						Assert.AreEqual (0, envelope.To.Count, "To counts do not match.");
+						Assert.AreEqual (0, envelope.Cc.Count, "Cc counts do not match.");
+						Assert.AreEqual (0, envelope.Bcc.Count, "Bcc counts do not match.");
+
+						Assert.IsNull (envelope.InReplyTo, "In-Reply-To is not null.");
+						Assert.IsNull (envelope.MessageId, "Message-Id is not null.");
+					}
+				}
+			}
+		}
+
 		[Test]
 		public void TestParseMalformedMailboxAddressInEnvelope ()
 		{
 			const string text = "(\"Mon, 10 Apr 2017 06:04:00 -0700\" \"Session 2: Building the meditation habit\" ((\"Headspace\" NIL \"members\" \"headspace.com\")) ((NIL NIL \"<members=headspace.com\" \"members.headspace.com>\")) ((\"Headspace\" NIL \"members\" \"headspace.com\")) ((NIL NIL \"user\" \"gmail.com\")) NIL NIL NIL \"<bvqyalstpemxt9y3afoqh4an62b2arcd.rcd.1491829440@members.headspace.com>\")";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						Envelope envelope;
 
@@ -403,7 +498,7 @@ namespace UnitTests.Net.Imap {
 			const string text = "(\"Mon, 13 Jul 2015 21:15:32 -0400\" \"Test message\" ((\"Example From\" \"@route1,@route2\" \"from\" \"example.com\")) ((\"Example Sender\" NIL \"sender\" \"example.com\")) ((\"Example Reply-To\" NIL \"reply-to\" \"example.com\")) ((NIL NIL \"boys\" NIL)(NIL NIL \"aaron\" \"MISSING_DOMAIN\")(NIL NIL \"jeff\" \"MISSING_DOMAIN\")(NIL NIL \"zach\" \"MISSING_DOMAIN\")(NIL NIL NIL NIL)(NIL NIL \"girls\" NIL)(NIL NIL \"alice\" \"MISSING_DOMAIN\")(NIL NIL \"hailey\" \"MISSING_DOMAIN\")(NIL NIL \"jenny\" \"MISSING_DOMAIN\")(NIL NIL NIL NIL)) NIL NIL NIL \"<MV4F9T0FLVT4.2CZLZPO4HZ8B3@Jeffreys-MacBook-Air.local>\")";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						Envelope envelope;
 
@@ -431,7 +526,7 @@ namespace UnitTests.Net.Imap {
 			const string text = "(\"Mon, 13 Jul 2015 21:15:32 -0400\" \"Test message\" ((\"Example From\" NIL \"from\" \"example.com\")) ((\"Example Sender\" NIL \"sender\" \"example.com\")) ((\"Example Reply-To\" NIL \"reply-to\" \"example.com\")) ((NIL NIL \"boys\" NIL)(NIL NIL \"aaron\" \"MISSING_DOMAIN\")(NIL NIL \"jeff\" \"MISSING_DOMAIN\")(NIL NIL \"zach\" \"MISSING_DOMAIN\")(NIL NIL NIL NIL)(NIL NIL \"girls\" NIL)(NIL NIL \"alice\" \"MISSING_DOMAIN\")(NIL NIL \"hailey\" \"MISSING_DOMAIN\")(NIL NIL \"jenny\" \"MISSING_DOMAIN\")(NIL NIL NIL NIL)) NIL NIL NIL \"<MV4F9T0FLVT4.2CZLZPO4HZ8B3@Jeffreys-MacBook-Air.local>\")";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						Envelope envelope;
 
@@ -459,7 +554,7 @@ namespace UnitTests.Net.Imap {
 			const string text = "(((\"text\" \"plain\" (\"charset\" \"iso-8859-2\") NIL NIL \"quoted-printable\" 28 2 NIL NIL NIL NIL) (\"text\" \"html\" (\"charset\" \"iso-8859-2\") NIL NIL \"quoted-printable\" 1707 65 NIL NIL NIL NIL) \"alternative\" (\"boundary\" \"----=_NextPart_001_0078_01CBB179.57530990\") NIL NIL NIL) (\"message\" \"rfc822\" NIL NIL NIL \"7bit\" 641 (\"Sat, 8 Jan 2011 14:16:36 +0100\" \"Subj 2\" ((\"Some Name, SOMECOMPANY\" NIL \"recipient\" \"example.com\")) ((\"Some Name, SOMECOMPANY\" NIL \"recipient\" \"example.com\")) ((\"Some Name, SOMECOMPANY\" NIL \"recipient\" \"example.com\")) ((\"Recipient\" NIL \"example\" \"gmail.com\")) NIL NIL NIL NIL) (\"text\" \"plain\" (\"charset\" \"iso-8859-2\") NIL NIL \"quoted-printable\" 185 18 NIL NIL (\"cs\") NIL) 31 NIL (\"attachment\" NIL) NIL NIL) (\"message\" \"rfc822\" NIL NIL NIL \"7bit\" 50592 (\"Sat, 8 Jan 2011 13:58:39 +0100\" \"Subj 1\" ((\"Some Name, SOMECOMPANY\" NIL \"recipient\" \"example.com\")) ((\"Some Name, SOMECOMPANY\" NIL \"recipient\" \"example.com\")) ((\"Some Name, SOMECOMPANY\" NIL \"recipient\" \"example.com\")) ((\"Recipient\" NIL \"example\" \"gmail.com\")) NIL NIL NIL NIL) ( (\"text\" \"plain\" (\"charset\" \"iso-8859-2\") NIL NIL \"quoted-printable\" 4296 345 NIL NIL NIL NIL) (\"text\" \"html\" (\"charset\" \"iso-8859-2\") NIL NIL \"quoted-printable\" 45069 1295 NIL NIL NIL NIL) \"alternative\" (\"boundary\" \"----=_NextPart_000_0073_01CBB179.57530990\") NIL (\"cs\") NIL) 1669 NIL (\"attachment\" NIL) NIL NIL) \"mixed\" (\"boundary\" \"----=_NextPart_000_0077_01CBB179.57530990\") NIL (\"cs\") NIL)\r\n";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						BodyPartMultipart multipart;
 						BodyPart body;
@@ -492,12 +587,124 @@ namespace UnitTests.Net.Imap {
 			}
 		}
 
+		// This tests the work-around for issue #878
+		[Test]
+		public void TestParseBodyStructureWithBrokenMultipartRelated ()
+		{
+			const string text = "((\"multipart\" \"related\" (\"boundary\" \"----=_@@@@BeautyqueenS87@_@147836_6893840099.85426606923635\") NIL NIL \"7BIT\" 400 (\"boundary\" \"----=_@@@@BeautyqueenS87@_@147836_6893840099.85426606923635\") NIL NIL NIL)(\"TEXT\" \"html\" (\"charset\" \"UTF8\") NIL NIL \"7BIT\" 1115 70 NIL NIL NIL NIL)(\"TEXT\" \"html\" (\"charset\" \"UTF8\") NIL NIL \"QUOTED-PRINTABLE\" 16 2 NIL NIL NIL NIL) \"mixed\" (\"boundary\" \"----=--_DRYORTABLE@@@_@@@8957836_03253840099.78526606923635\") NIL NIL NIL)\r\n";
+			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
+					using (var engine = new ImapEngine (null)) {
+						BodyPart body;
+
+						engine.SetStream (tokenizer);
+
+						try {
+							body = ImapUtils.ParseBodyAsync (engine, "Unexpected token: {0}", string.Empty, false, CancellationToken.None).GetAwaiter ().GetResult ();
+						} catch (Exception ex) {
+							Assert.Fail ("Parsing BODYSTRUCTURE failed: {0}", ex);
+							return;
+						}
+
+						var token = engine.ReadToken (CancellationToken.None);
+						Assert.AreEqual (ImapTokenType.Eoln, token.Type, "Expected new-line, but got: {0}", token);
+
+						Assert.IsInstanceOf<BodyPartMultipart> (body, "Body types did not match.");
+						var multipart = (BodyPartMultipart) body;
+
+						Assert.IsTrue (multipart.ContentType.IsMimeType ("multipart", "mixed"), "multipart/mixed Content-Type did not match.");
+						Assert.AreEqual ("----=--_DRYORTABLE@@@_@@@8957836_03253840099.78526606923635", multipart.ContentType.Parameters["boundary"], "boundary param did not match");
+						Assert.AreEqual (3, multipart.BodyParts.Count, "BodyParts count did not match.");
+
+						Assert.IsInstanceOf<BodyPartBasic> (multipart.BodyParts[0], "The type of the first child did not match.");
+						Assert.IsInstanceOf<BodyPartText> (multipart.BodyParts[1], "The type of the second child did not match.");
+						Assert.IsInstanceOf<BodyPartText> (multipart.BodyParts[2], "The type of the third child did not match.");
+
+						var related = (BodyPartBasic) multipart.BodyParts[0];
+						Assert.IsTrue (related.ContentType.IsMimeType ("multipart", "related"), "multipart/related Content-Type did not match.");
+						Assert.AreEqual ("----=_@@@@BeautyqueenS87@_@147836_6893840099.85426606923635", related.ContentType.Parameters["boundary"], "multipart/related boundary param did not match");
+						Assert.AreEqual ("7BIT", related.ContentTransferEncoding, "multipart/related Content-Transfer-Encoding did not match.");
+						Assert.AreEqual (400, related.Octets, "multipart/related octets do not match.");
+					}
+				}
+			}
+		}
+
+		// This tests the work-around for issue #944
+		[Test]
+		public void TestParseBodyStructureWithEmptyParenListAsMessageRfc822BodyToken ()
+		{
+			const string text = "((\"text\" \"plain\" (\"charset\" \"UTF-8\") NIL NIL \"base64\" 232 4 NIL NIL NIL)(\"message\" \"delivery-status\" NIL NIL NIL \"7BIT\" 421 NIL NIL NIL)(\"message\" \"rfc822\" NIL NIL NIL \"7BIT\" 787 (NIL NIL NIL NIL NIL NIL NIL NIL NIL NIL) () 0 NIL NIL NIL) \"report\" (\"report-type\" \"delivery-status\" \"boundary\" \"==IFJRGLKFGIR60132UHRUHIHD\") NIL NIL)\r\n";
+			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
+					using (var engine = new ImapEngine (null)) {
+						BodyPart body;
+
+						engine.SetStream (tokenizer);
+
+						try {
+							body = ImapUtils.ParseBodyAsync (engine, "Unexpected token: {0}", string.Empty, false, CancellationToken.None).GetAwaiter ().GetResult ();
+						} catch (Exception ex) {
+							Assert.Fail ("Parsing BODYSTRUCTURE failed: {0}", ex);
+							return;
+						}
+
+						var token = engine.ReadToken (CancellationToken.None);
+						Assert.AreEqual (ImapTokenType.Eoln, token.Type, "Expected new-line, but got: {0}", token);
+
+						Assert.IsInstanceOf<BodyPartMultipart> (body, "Body types did not match.");
+						var multipart = (BodyPartMultipart) body;
+
+						Assert.IsTrue (multipart.ContentType.IsMimeType ("multipart", "report"), "multipart/report Content-Type did not match.");
+						Assert.AreEqual ("==IFJRGLKFGIR60132UHRUHIHD", multipart.ContentType.Parameters["boundary"], "boundary param did not match.");
+						Assert.AreEqual ("delivery-status", multipart.ContentType.Parameters["report-type"], "report-type param did not match.");
+						Assert.AreEqual (3, multipart.BodyParts.Count, "BodyParts count did not match.");
+
+						Assert.IsInstanceOf<BodyPartText> (multipart.BodyParts[0], "The type of the first child did not match.");
+						Assert.IsInstanceOf<BodyPartBasic> (multipart.BodyParts[1], "The type of the second child did not match.");
+						Assert.IsInstanceOf<BodyPartMessage> (multipart.BodyParts[2], "The type of the third child did not match.");
+
+						var plain = (BodyPartText) multipart.BodyParts[0];
+						Assert.IsTrue (plain.ContentType.IsMimeType ("text", "plain"), "text/plain Content-Type did not match.");
+						Assert.AreEqual ("UTF-8", plain.ContentType.Charset, "text/plain charset param did not match.");
+						Assert.AreEqual ("base64", plain.ContentTransferEncoding, "text/plain encoding did not match.");
+						Assert.AreEqual (232, plain.Octets, "text/plain octets did not match.");
+						Assert.AreEqual (4, plain.Lines, "text/plain lines did not match.");
+
+						var dstat = (BodyPartBasic) multipart.BodyParts[1];
+						Assert.IsTrue (dstat.ContentType.IsMimeType ("message", "delivery-status"), "message/delivery-status Content-Type did not match.");
+						Assert.AreEqual ("7BIT", dstat.ContentTransferEncoding, "message/delivery-status encoding did not match.");
+						Assert.AreEqual (421, dstat.Octets, "message/delivery-status octets did not match.");
+
+						var rfc822 = (BodyPartMessage) multipart.BodyParts[2];
+						Assert.IsTrue (rfc822.ContentType.IsMimeType ("message", "rfc822"), "message/rfc822 Content-Type did not match.");
+						Assert.IsNull (rfc822.ContentId, "message/rfc822 Content-Id should be NIL.");
+						Assert.IsNull (rfc822.ContentDescription, "message/rfc822 Content-Description should be NIL.");
+						Assert.AreEqual (0, rfc822.Envelope.Sender.Count, "message/rfc822 Envlope.Sender should be null.");
+						Assert.AreEqual (0, rfc822.Envelope.From.Count, "message/rfc822 Envlope.From should be null.");
+						Assert.AreEqual (0, rfc822.Envelope.ReplyTo.Count, "message/rfc822 Envlope.ReplyTo should be null.");
+						Assert.AreEqual (0, rfc822.Envelope.To.Count, "message/rfc822 Envlope.To should be null.");
+						Assert.AreEqual (0, rfc822.Envelope.Cc.Count, "message/rfc822 Envlope.Cc should be null.");
+						Assert.AreEqual (0, rfc822.Envelope.Bcc.Count, "message/rfc822 Envlope.Bcc should be null.");
+						Assert.IsNull (rfc822.Envelope.Subject, "message/rfc822 Envlope.Subject should be null.");
+						Assert.IsNull (rfc822.Envelope.MessageId, "message/rfc822 Envlope.MessageId should be null.");
+						Assert.IsNull (rfc822.Envelope.InReplyTo, "message/rfc822 Envlope.InReplyTo should be null.");
+						Assert.IsNull (rfc822.Envelope.Date, "message/rfc822 Envlope.Date should be null.");
+						Assert.AreEqual ("7BIT", rfc822.ContentTransferEncoding, "message/rfc822 encoding did not match.");
+						Assert.AreEqual (787, rfc822.Octets, "message/rfc822 octets did not match.");
+						Assert.IsNull (rfc822.Body, "message/rfc822 body should be null.");
+						Assert.AreEqual (0, rfc822.Lines, "message/rfc822 lines did not match.");
+					}
+				}
+			}
+		}
+
 		[Test]
 		public void TestParseBodyStructureWithContentMd5DspLanguageAndLocation ()
 		{
 			const string text = "((\"text\" \"plain\" (\"charset\" \"iso-8859-1\") NIL NIL \"quoted-printable\" 28 2 \"md5sum\" (\"inline\" (\"filename\" \"body.txt\")) \"en\" \"http://www.google.com/body.txt\") (\"text\" \"html\" (\"charset\" \"iso-8859-1\") NIL NIL \"quoted-printable\" 1707 65 \"md5sum\" (\"inline\" (\"filename\" \"body.html\")) \"en\" \"http://www.google.com/body.html\") \"alternative\" (\"boundary\" \"----=_NextPart_001_0078_01CBB179.57530990\") (\"inline\" (\"filename\" \"alternative.txt\")) \"en\" \"http://www.google.com/alternative.txt\")\r\n";
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						BodyPart body;
 
@@ -564,7 +771,7 @@ namespace UnitTests.Net.Imap {
 		{
 			const string text = "(({4}\r\ntext {5}\r\nplain ({7}\r\ncharset {10}\r\niso-8859-1) NIL NIL {16}\r\nquoted-printable 28 2 {6}\r\nmd5sum ({6}\r\ninline ({8}\r\nfilename {8}\r\nbody.txt)) {2}\r\nen {30}\r\nhttp://www.google.com/body.txt) (\"text\" \"html\" (\"charset\" \"iso-8859-1\") NIL NIL \"quoted-printable\" 1707 65 \"md5sum\" (\"inline\" (\"filename\" \"body.html\")) \"en\" \"http://www.google.com/body.html\") {11}\r\nalternative (\"boundary\" \"----=_NextPart_001_0078_01CBB179.57530990\") (\"inline\" (\"filename\" \"alternative.txt\")) \"en\" \"http://www.google.com/alternative.txt\")\r\n";
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						BodyPart body;
 
@@ -631,7 +838,7 @@ namespace UnitTests.Net.Imap {
 		{
 			const string text = "((\"text\" \"plain\" (\"charset\" \"iso-8859-1\") NIL NIL \"quoted-printable\" 28 2 \"md5sum\" (\"inline\" (\"filename\" \"body.txt\")) \"en\" \"body.txt\" \"extension1\" 123 (\"extension2\" (\"nested-extension3\" \"nested-extension4\"))) (\"text\" \"html\" (\"charset\" \"iso-8859-1\") NIL NIL \"quoted-printable\" 1707 65 \"md5sum\" (\"inline\" (\"filename\" \"body.html\")) \"en\" \"http://www.google.com/body.html\") \"alternative\" (\"boundary\" \"----=_NextPart_001_0078_01CBB179.57530990\") (\"inline\" (\"filename\" \"alternative.txt\")) \"en\" \"http://www.google.com/alternative.txt\" {10}\r\nextension1 123 (\"extension2\" (\"nested-extension3\" \"nested-extension4\")))\r\n";
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						BodyPart body;
 
@@ -700,7 +907,7 @@ namespace UnitTests.Net.Imap {
 			const string text = "((\"ALTERNATIVE\" (\"BOUNDARY\" \"==alternative_xad5934455aeex\") NIL NIL)(\"TEXT\" \"HTML\" (\"CHARSET\" \"iso-8859-1\" \"NAME\" \"seti_letter.html\") NIL NIL \"7BIT\" 6769 171 NIL NIL NIL) \"ALTERNATIVE\" (\"BOUNDARY\" \"==alternative_xad5934455aeex\") NIL NIL)\r\n";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						BodyPartMultipart multipart, broken;
 						BodyPartText html;
@@ -749,7 +956,7 @@ namespace UnitTests.Net.Imap {
 			const string text = "(((\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\" \"DELSP\" \"yes\" \"FORMAT\" \"flowed\") NIL NIL \"BASE64\" 10418 133 NIL NIL NIL)(\"TEXT\" \"HTML\" (\"CHARSET\" \"UTF-8\") NIL NIL \"BASE64\" 34544 442 NIL NIL NIL) \"ALTERNATIVE\" (\"BOUNDARY\" \"94eb2c1cd0507723d5054c1ce6cb\") NIL NIL)(\"RELATED\" NIL (\"ATTACHMENT\" NIL) NIL)(\"RELATED\" NIL (\"ATTACHMENT\" NIL) NIL)(\"RELATED\" NIL (\"ATTACHMENT\" NIL) NIL)(\"RELATED\" NIL (\"ATTACHMENT\" NIL) NIL) \"MIXED\" (\"BOUNDARY\" \"94eb2c1cd0507723e6054c1ce6cd\") NIL NIL)\r\n";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						BodyPart body;
 
@@ -828,7 +1035,7 @@ namespace UnitTests.Net.Imap {
 			const string text = "((\"TEXT\" \"PLAIN\" (\"CHARSET\" \"windows-1251\") NIL NIL \"base64\" 356 5)( \"X-ZIP\" (\"BOUNDARY\" \"\") NIL NIL \"base64\" 4096) \"MIXED\" (\"BOUNDARY\" \"--cd49a2f5ed4ed0cbb6f9f1c7f125541f\") NIL NIL)\r\n";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						BodyPartMultipart multipart;
 						BodyPartBasic xzip;
@@ -878,7 +1085,7 @@ namespace UnitTests.Net.Imap {
 			const string text = "((\"MOUNDARY=\"_006_5DBB50A5A54730AD4A54730AD4A54730AD4A54730AD42KOS_\"\" \"OCTET-STREAM\" (\"name\" \"test.dat\") NIL NIL \"quoted-printable\" 383137 NIL (\"attachment\" (\"filename\" \"test.dat\")))(\"MOUNDARY=\"_006_5DBB50A5D3ABEC4E85A03EAD527CA5474B3D0AF9E6EXMBXSVR02KOS_\"\" \"OCTET-STREAM\" (\"name\" \"test.dat\") NIL NIL \"quoted-printable\" 383137 NIL (\"attachment\" (\"filename\" \"test.dat\"))) \"MIXED\" (\"boundary\" \"----=_NextPart_000_730AD4A547.730AD4A547F40\"))\r\n";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						BodyPartMultipart multipart;
 						BodyPartBasic basic;
@@ -921,7 +1128,7 @@ namespace UnitTests.Net.Imap {
 			const string text = "(((\"text\" \"plain\" (\"charset\" \"UTF-8\") NIL NIL \"7bit\" 148 12 NIL NIL NIL NIL)(\"text\" \"html\" (\"charset\" \"UTF-8\") NIL NIL \"quoted-printable\" 337 6 NIL NIL NIL NIL) \"alternative\" (\"boundary\" \"6c7f221bed92d80548353834d8e2\") NIL NIL NIL)((\"text\" \"plain\" (\"charset\" \"us-ascii\") NIL NIL \"7bit\" 0 0) \"x-zip\" NIL (\"attachment\" (\"filename\" \"YSOZ 265230.ZIP\")) NIL NIL) \"mixed\" (\"boundary\" \"c52bbfc0dd5365efa39b9f80eac3\") NIL NIL NIL)\r\n";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						BodyPartMultipart multipart, alternative, xzip;
 						BodyPart body;
@@ -965,7 +1172,7 @@ namespace UnitTests.Net.Imap {
 			const string text = "((\"text\" \"plain\" (\"charset\" \"UTF-8\") NIL \"Message text\" \"Quoted-printable\" 209 6 NIL (\"inline\" NIL) NIL NIL)(\"text\" \"xml\" (\"name\" \"4441004299066.xml\") NIL \"4441004299066.xml\" \"Base64\" 10642 137 NIL (\"inline\" (\"filename\" \"4441004299066.xml\")) NIL NIL)(\"application\" \"pdf\" (\"name\" \"4441004299066.pdf\") NIL \"4441004299066.pdf\" \"Base64\" 48448 NIL (\"inline\" (\"filename\" \"4441004299066.pdf\")) NIL NIL) \"mixed\" (\"boundary\" \"6624CFB2_17170C36_Synapse_boundary\") \"Multipart message\" NIL)\r\n";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						BodyPartMultipart multipart;
 						BodyPartBasic basic;
@@ -1010,13 +1217,167 @@ namespace UnitTests.Net.Imap {
 			}
 		}
 
+		// Note: This tests the work-around for issue #919
+		[Test]
+		public void TestParseBodyStructureWithNonParenthesizedBodyFldDsp ()
+		{
+			const string text = "((\"text\" \"plain\" (\"charset\" \"ISO-8859-1\") NIL NIL \"QUOTED-PRINTABLE\" 850 31 NIL \"inline\" NIL NIL)(\"text\" \"html\" (\"charset\" \"ISO-8859-1\") NIL NIL \"QUOTED-PRINTABLE\" 14692 502 NIL \"inline\" NIL NIL) \"alternative\" (\"boundary\" \"----=_Part_45280395_786508794.1562673197246\") NIL NIL)\r\n";
+
+			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
+					using (var engine = new ImapEngine (null)) {
+						BodyPartMultipart multipart;
+						BodyPartText plain, html;
+						BodyPart body;
+
+						engine.SetStream (tokenizer);
+
+						try {
+							body = ImapUtils.ParseBodyAsync (engine, "Unexpected token: {0}", string.Empty, false, CancellationToken.None).GetAwaiter ().GetResult ();
+						} catch (Exception ex) {
+							Assert.Fail ("Parsing BODYSTRUCTURE failed: {0}", ex);
+							return;
+						}
+
+						var token = engine.ReadToken (CancellationToken.None);
+						Assert.AreEqual (ImapTokenType.Eoln, token.Type, "Expected new-line, but got: {0}", token);
+
+						Assert.IsInstanceOf<BodyPartMultipart> (body, "Body types did not match.");
+						multipart = (BodyPartMultipart) body;
+
+						Assert.IsTrue (body.ContentType.IsMimeType ("multipart", "alternative"), "Content-Type did not match.");
+						Assert.AreEqual ("----=_Part_45280395_786508794.1562673197246", body.ContentType.Parameters["boundary"], "boundary param did not match");
+						Assert.AreEqual (2, multipart.BodyParts.Count, "BodyParts count does not match.");
+
+						Assert.IsInstanceOf<BodyPartText> (multipart.BodyParts[0], "The type of the first child does not match.");
+						plain = (BodyPartText) multipart.BodyParts[0];
+						Assert.AreEqual ("text/plain", plain.ContentType.MimeType, "Content-Type did not match.");
+						Assert.AreEqual ("ISO-8859-1", plain.ContentType.Charset, "Content-Type charset parameter did not match.");
+						Assert.AreEqual ("QUOTED-PRINTABLE", plain.ContentTransferEncoding, "Content-Transfer-Encoding did not match.");
+						Assert.AreEqual (850, plain.Octets, "Octets did not match.");
+						Assert.AreEqual (31, plain.Lines, "Lines did not match.");
+						Assert.AreEqual ("inline", plain.ContentDisposition.Disposition, "Content-Disposition did not match.");
+
+						Assert.IsInstanceOf<BodyPartText> (multipart.BodyParts[1], "The type of the second child does not match.");
+						html = (BodyPartText) multipart.BodyParts[1];
+						Assert.AreEqual ("text/html", html.ContentType.MimeType, "Content-Type did not match.");
+						Assert.AreEqual ("ISO-8859-1", html.ContentType.Charset, "Content-Type charset parameter did not match.");
+						Assert.AreEqual ("QUOTED-PRINTABLE", html.ContentTransferEncoding, "Content-Transfer-Encoding did not match.");
+						Assert.AreEqual (14692, html.Octets, "Octets did not match.");
+						Assert.AreEqual (502, html.Lines, "Lines did not match.");
+						Assert.AreEqual ("inline", html.ContentDisposition.Disposition, "Content-Disposition did not match.");
+					}
+				}
+			}
+		}
+
+		// Note: This tests the work-around for an Exchange bug
+		[Test]
+		public void TestParseBodyStructureWithNilNilBodyFldDsp ()
+		{
+			const string text = "((\"text\" \"plain\" (\"charset\" \"iso-8859-1\") NIL \"Mail message body\" \"quoted-printable\" 2201 34 NIL NIL NIL NIL)(\"application\" \"msword\" NIL NIL NIL \"base64\" 50446 NIL (NIL NIL) NIL NIL)(\"application\" \"msword\" NIL NIL NIL \"base64\" 45544 NIL (\"attachment\" (\"filename\" \"PREIS ANSPRUCHS FORMULAR.doc\")) NIL NIL) \"mixed\" (\"boundary\" \"===============1176586998==\") NIL NIL)\r\n";
+
+			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
+					using (var engine = new ImapEngine (null)) {
+						BodyPartMultipart multipart;
+						BodyPartBasic msword;
+						BodyPartText plain;
+						BodyPart body;
+
+						engine.SetStream (tokenizer);
+
+						try {
+							body = ImapUtils.ParseBodyAsync (engine, "Unexpected token: {0}", string.Empty, false, CancellationToken.None).GetAwaiter ().GetResult ();
+						} catch (Exception ex) {
+							Assert.Fail ("Parsing BODYSTRUCTURE failed: {0}", ex);
+							return;
+						}
+
+						var token = engine.ReadToken (CancellationToken.None);
+						Assert.AreEqual (ImapTokenType.Eoln, token.Type, "Expected new-line, but got: {0}", token);
+
+						Assert.IsInstanceOf<BodyPartMultipart> (body, "Body types did not match.");
+						multipart = (BodyPartMultipart) body;
+
+						Assert.IsTrue (body.ContentType.IsMimeType ("multipart", "mixed"), "Content-Type did not match.");
+						Assert.AreEqual ("===============1176586998==", body.ContentType.Parameters["boundary"], "boundary param did not match");
+						Assert.AreEqual (3, multipart.BodyParts.Count, "BodyParts count does not match.");
+
+						Assert.IsInstanceOf<BodyPartText> (multipart.BodyParts[0], "The type of the first child does not match.");
+						plain = (BodyPartText) multipart.BodyParts[0];
+						Assert.AreEqual ("text/plain", plain.ContentType.MimeType, "Content-Type did not match.");
+						Assert.AreEqual ("iso-8859-1", plain.ContentType.Charset, "Content-Type charset parameter did not match.");
+						Assert.AreEqual ("quoted-printable", plain.ContentTransferEncoding, "Content-Transfer-Encoding did not match.");
+						Assert.AreEqual ("Mail message body", plain.ContentDescription, "Content-Description did not match.");
+						Assert.AreEqual (2201, plain.Octets, "Octets did not match.");
+						Assert.AreEqual (34, plain.Lines, "Lines did not match.");
+						Assert.IsNull (plain.ContentDisposition, "Content-Disposition did not match.");
+
+						Assert.IsInstanceOf<BodyPartBasic> (multipart.BodyParts[1], "The type of the second child does not match.");
+						msword = (BodyPartBasic) multipart.BodyParts[1];
+						Assert.AreEqual ("application/msword", msword.ContentType.MimeType, "Content-Type did not match.");
+						Assert.AreEqual ("base64", msword.ContentTransferEncoding, "Content-Transfer-Encoding did not match.");
+						Assert.AreEqual (50446, msword.Octets, "Octets did not match.");
+						Assert.IsNull (msword.ContentDisposition, "Content-Disposition did not match.");
+
+						Assert.IsInstanceOf<BodyPartBasic> (multipart.BodyParts[2], "The type of the second child does not match.");
+						msword = (BodyPartBasic) multipart.BodyParts[2];
+						Assert.AreEqual ("application/msword", msword.ContentType.MimeType, "Content-Type did not match.");
+						Assert.AreEqual ("base64", msword.ContentTransferEncoding, "Content-Transfer-Encoding did not match.");
+						Assert.AreEqual (45544, msword.Octets, "Octets did not match.");
+						Assert.AreEqual ("attachment", msword.ContentDisposition.Disposition, "Content-Disposition did not match.");
+						Assert.AreEqual ("PREIS ANSPRUCHS FORMULAR.doc", msword.ContentDisposition.FileName, "Filename parameters do not match.");
+					}
+				}
+			}
+		}
+
+		[Test]
+		public void TestParseBodyStructureWithSwappedBodyFldDspAndBodyFldLang ()
+		{
+			const string text = "(((\"text\" \"plain\" (\"format\" \"flowed\" \"charset\" \"UTF-8\") NIL NIL \"8bit\" 314 8 NIL NIL NIL NIL)(\"text\" \"html\" (\"charset\" \"UTF-8\") NIL NIL \"8bit\" 763 18 NIL NIL NIL NIL) \"alternative\" (\"boundary\" \"b3_f0dcbd2fdb06033cba91309b09af1cd8\") NIL NIL NIL NIL)(\"image\" \"jpeg\" (\"name\" \"18e5ca259ceb18af6dd3ea0659f83a4c\") \"<18e5ca259ceb18af6dd3ea0659f83a4c>\" NIL \"base64\" 334384 NIL NIL NIL NIL)(\"image\" \"png\" (\"name\" \"87c487a1ff757e32ee27ff267d28af35\") \"<87c487a1ff757e32ee27ff267d28af35>\" NIL \"base64\" 375634 NIL NIL NIL NIL) \"related\" (\"type\" \"multipart/alternative\" \"charset\" \"UTF-8\" \"boundary\" \"b1_f0dcbd2fdb06033cba91309b09af1cd8\") NIL (\"inline\" NIL) NIL NIL)\r\n";
+
+			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
+					using (var engine = new ImapEngine (null)) {
+						BodyPartMultipart multipart;
+						BodyPartBasic msword;
+						BodyPartText plain;
+						BodyPart body;
+
+						engine.SetStream (tokenizer);
+
+						try {
+							body = ImapUtils.ParseBodyAsync (engine, "Unexpected token: {0}", string.Empty, false, CancellationToken.None).GetAwaiter ().GetResult ();
+						} catch (Exception ex) {
+							Assert.Fail ("Parsing BODYSTRUCTURE failed: {0}", ex);
+							return;
+						}
+
+						var token = engine.ReadToken (CancellationToken.None);
+						Assert.AreEqual (ImapTokenType.Eoln, token.Type, "Expected new-line, but got: {0}", token);
+
+						Assert.IsInstanceOf<BodyPartMultipart> (body, "Body types did not match.");
+						multipart = (BodyPartMultipart) body;
+
+						Assert.IsTrue (multipart.ContentType.IsMimeType ("multipart", "related"), "Content-Type did not match.");
+						Assert.AreEqual ("b1_f0dcbd2fdb06033cba91309b09af1cd8", multipart.ContentType.Parameters["boundary"], "boundary param did not match");
+						Assert.AreEqual (3, multipart.BodyParts.Count, "BodyParts count does not match.");
+						Assert.AreEqual (1, multipart.ContentLanguage.Length, "Content-Language lengths do not match.");
+						Assert.AreEqual ("inline", multipart.ContentLanguage[0], "Content-Language does not match.");
+					}
+				}
+			}
+		}
+
 		[Test]
 		public void TestParseExampleThreads ()
 		{
 			const string text = "(2)(3 6 (4 23)(44 7 96))\r\n";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						IList<MessageThread> threads;
 
@@ -1071,7 +1432,7 @@ namespace UnitTests.Net.Imap {
 			const string text = "(3 4 5 6 7)(1)((2)(8)(15))(9)(16)(10)(11)(12 13)(14)(17)(18)(19)(20)(21)(22)(23)(24)(25 (26)(29 39)(31)(32))(27)(28)(38 35)(30 33 34)(37)(36)(40)(41)((42 43)(44)(48)(49)(50)(51 52))(45)((46)(55))(47)(53)(54)(56)(57 (58)(59)(60)(63))((61)(62))(64)(65)(70)((66)(67)(68)(69)(71))(72 73 (74)(75)(76 77))\r\n";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						IList<MessageThread> threads;
 
@@ -1106,7 +1467,7 @@ namespace UnitTests.Net.Imap {
 			const string text = "((352)(381))\r\n";
 
 			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
-				using (var tokenizer = new ImapStream (memory, null, new NullProtocolLogger ())) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
 					using (var engine = new ImapEngine (null)) {
 						IList<MessageThread> threads;
 
@@ -1131,6 +1492,169 @@ namespace UnitTests.Net.Imap {
 
 						Assert.AreEqual ((uint) 352, children[0].UniqueId.Value.Id);
 						Assert.AreEqual ((uint) 381, children[1].UniqueId.Value.Id);
+					}
+				}
+			}
+		}
+
+		[Test]
+		public void TestFormatAnnotations ()
+		{
+			var annotations = new List<Annotation> ();
+			var command = new StringBuilder ("STORE ");
+			var args = new List<object> ();
+
+			ImapUtils.FormatAnnotations (command, annotations, args, false);
+			Assert.AreEqual ("STORE ", command.ToString (), "empty collection");
+
+			annotations.Add (new Annotation (AnnotationEntry.AltSubject));
+
+			ImapUtils.FormatAnnotations (command, annotations, args, false);
+			Assert.AreEqual ("STORE ", command.ToString (), "annotation w/o properties");
+			Assert.Throws<ArgumentException> (() => ImapUtils.FormatAnnotations (command, annotations, args, true));
+
+			command.Clear ();
+			command.Append ("STORE ");
+			annotations[0].Properties.Add (AnnotationAttribute.SharedValue, "This is an alternate subject.");
+			ImapUtils.FormatAnnotations (command, annotations, args, true);
+			Assert.AreEqual ("STORE ANNOTATION (/altsubject (value.shared %S))", command.ToString ());
+			Assert.AreEqual (1, args.Count, "args");
+			Assert.AreEqual ("This is an alternate subject.", args[0], "args[0]");
+		}
+
+		[Test]
+		public void TestParseAnnotationsExample1 ()
+		{
+			const string text = "(/comment (value.priv \"My comment\" value.shared NIL))\r\n";
+
+			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
+					using (var engine = new ImapEngine (null)) {
+						IList<Annotation> annotations;
+
+						engine.SetStream (tokenizer);
+
+						try {
+							annotations = ImapUtils.ParseAnnotationsAsync (engine, false, CancellationToken.None).GetAwaiter ().GetResult ();
+						} catch (Exception ex) {
+							Assert.Fail ("Parsing ANNOTATION response failed: {0}", ex);
+							return;
+						}
+
+						var token = engine.ReadToken (CancellationToken.None);
+						Assert.AreEqual (ImapTokenType.Eoln, token.Type, "Expected new-line, but got: {0}", token);
+
+						Assert.AreEqual (1, annotations.Count, "Count");
+						Assert.AreEqual (AnnotationEntry.Comment, annotations[0].Entry, "Entry");
+						Assert.AreEqual (2, annotations[0].Properties.Count, "Properties.Count");
+						Assert.AreEqual ("My comment", annotations[0].Properties[AnnotationAttribute.PrivateValue], "value.priv");
+						Assert.AreEqual (null, annotations[0].Properties[AnnotationAttribute.SharedValue], "value.shared");
+					}
+				}
+			}
+		}
+
+		[Test]
+		public void TestParseAnnotationsExample2 ()
+		{
+			const string text = "(/comment (value.priv \"My comment\" value.shared NIL) /altsubject (value.priv \"My subject\" value.shared NIL))\r\n";
+
+			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
+					using (var engine = new ImapEngine (null)) {
+						IList<Annotation> annotations;
+
+						engine.SetStream (tokenizer);
+
+						try {
+							annotations = ImapUtils.ParseAnnotationsAsync (engine, false, CancellationToken.None).GetAwaiter ().GetResult ();
+						} catch (Exception ex) {
+							Assert.Fail ("Parsing ANNOTATION response failed: {0}", ex);
+							return;
+						}
+
+						var token = engine.ReadToken (CancellationToken.None);
+						Assert.AreEqual (ImapTokenType.Eoln, token.Type, "Expected new-line, but got: {0}", token);
+
+						Assert.AreEqual (2, annotations.Count, "Count");
+						Assert.AreEqual (AnnotationEntry.Comment, annotations[0].Entry, "annotations[0].Entry");
+						Assert.AreEqual (2, annotations[0].Properties.Count, "annotations[0].Properties.Count");
+						Assert.AreEqual ("My comment", annotations[0].Properties[AnnotationAttribute.PrivateValue], "annotations[0] value.priv");
+						Assert.AreEqual (null, annotations[0].Properties[AnnotationAttribute.SharedValue], "annotations[0] value.shared");
+						Assert.AreEqual (AnnotationEntry.AltSubject, annotations[1].Entry, "annotations[1].Entry");
+						Assert.AreEqual (2, annotations[1].Properties.Count, "annotations[1].Properties.Count");
+						Assert.AreEqual ("My subject", annotations[1].Properties[AnnotationAttribute.PrivateValue], "annotations[1] value.priv");
+						Assert.AreEqual (null, annotations[1].Properties[AnnotationAttribute.SharedValue], "annotations[1] value.shared");
+					}
+				}
+			}
+		}
+
+		[Test]
+		public void TestParseAnnotationsExample3 ()
+		{
+			const string text = "(/comment (value.priv \"My comment\" value.shared NIL size.priv \"10\" size.shared \"0\"))\r\n";
+
+			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
+					using (var engine = new ImapEngine (null)) {
+						IList<Annotation> annotations;
+
+						engine.SetStream (tokenizer);
+
+						try {
+							annotations = ImapUtils.ParseAnnotationsAsync (engine, false, CancellationToken.None).GetAwaiter ().GetResult ();
+						} catch (Exception ex) {
+							Assert.Fail ("Parsing ANNOTATION response failed: {0}", ex);
+							return;
+						}
+
+						var token = engine.ReadToken (CancellationToken.None);
+						Assert.AreEqual (ImapTokenType.Eoln, token.Type, "Expected new-line, but got: {0}", token);
+
+						Assert.AreEqual (1, annotations.Count, "Count");
+						Assert.AreEqual (AnnotationEntry.Comment, annotations[0].Entry, "annotations[0].Entry");
+						Assert.AreEqual (4, annotations[0].Properties.Count, "annotations[0].Properties.Count");
+						Assert.AreEqual ("My comment", annotations[0].Properties[AnnotationAttribute.PrivateValue], "annotations[0] value.priv");
+						Assert.AreEqual (null, annotations[0].Properties[AnnotationAttribute.SharedValue], "annotations[0] value.shared");
+						Assert.AreEqual ("10", annotations[0].Properties[AnnotationAttribute.PrivateSize], "annotations[0] size.priv");
+						Assert.AreEqual ("0", annotations[0].Properties[AnnotationAttribute.SharedSize], "annotations[0] size.shared");
+					}
+				}
+			}
+		}
+
+		ImapFolder CreateImapFolder (ImapFolderConstructorArgs args)
+		{
+			return new ImapFolder (args);
+		}
+
+		// Tests the work-around for issue #945
+		[Test]
+		public void TestParseFolderListWithFolderNameContainingUnquotedTabs ()
+		{
+			const string text = " (\\HasNoChildren) \"/\" INBOX/Da\tOggetto\tRicevuto\tDimensione\tCategorie\t\r\n";
+
+			using (var memory = new MemoryStream (Encoding.ASCII.GetBytes (text), false)) {
+				using (var tokenizer = new ImapStream (memory, new NullProtocolLogger ())) {
+					using (var engine = new ImapEngine (CreateImapFolder)) {
+						var list = new List<ImapFolder> ();
+
+						engine.QuirksMode = ImapQuirksMode.Exchange;
+						engine.SetStream (tokenizer);
+
+						try {
+							ImapUtils.ParseFolderListAsync (engine, list, false, false, false, CancellationToken.None).GetAwaiter ().GetResult ();
+						} catch (Exception ex) {
+							Assert.Fail ("Parsing LIST response failed: {0}", ex);
+							return;
+						}
+
+						var token = engine.ReadToken (CancellationToken.None);
+						Assert.AreEqual (ImapTokenType.Eoln, token.Type, "Expected new-line, but got: {0}", token);
+
+						Assert.AreEqual (1, list.Count, "Count");
+						Assert.AreEqual ("Da\tOggetto\tRicevuto\tDimensione\tCategorie\t", list[0].Name, "Name");
 					}
 				}
 			}

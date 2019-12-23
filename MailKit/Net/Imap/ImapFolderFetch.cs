@@ -166,6 +166,16 @@ namespace MailKit.Net.Imap
 				if (token.Type == ImapTokenType.CloseParen || token.Type == ImapTokenType.Eoln)
 					break;
 
+				bool parenthesized = false;
+				if (engine.QuirksMode == ImapQuirksMode.Domino && token.Type == ImapTokenType.OpenParen) {
+					// Note: Lotus Domino IMAP will (sometimes?) encapsulate the `ENVELOPE` segment of the
+					// response within an extra set of parenthesis.
+					//
+					// See https://github.com/jstedfast/MailKit/issues/943 for details.
+					token = await engine.ReadTokenAsync (doAsync, cancellationToken).ConfigureAwait (false);
+					parenthesized = true;
+				}
+
 				ImapEngine.AssertToken (token, ImapTokenType.Atom, ImapEngine.GenericUntaggedResponseSyntaxErrorFormat, "FETCH", token);
 
 				var atom = (string) token.Value;
@@ -174,7 +184,7 @@ namespace MailKit.Net.Imap
 				uint value;
 				int idx;
 
-				switch (atom) {
+				switch (atom.ToUpperInvariant ()) {
 				case "INTERNALDATE":
 					token = await engine.ReadTokenAsync (doAsync, cancellationToken).ConfigureAwait (false);
 
@@ -377,6 +387,10 @@ namespace MailKit.Net.Imap
 					message.GMailLabels = await ImapUtils.ParseLabelsListAsync (engine, doAsync, cancellationToken).ConfigureAwait (false);
 					message.Fields |= MessageSummaryItems.GMailLabels;
 					break;
+				case "ANNOTATION":
+					message.Annotations = await ImapUtils.ParseAnnotationsAsync (engine, doAsync, cancellationToken).ConfigureAwait (false);
+					message.Fields |= MessageSummaryItems.Annotations;
+					break;
 				default:
 					// Unexpected or unknown token (such as XAOL.SPAM.REASON or XAOL-MSGID). Simply read 1 more token (the argument) and ignore.
 					token = await engine.ReadTokenAsync (doAsync, cancellationToken).ConfigureAwait (false);
@@ -384,6 +398,12 @@ namespace MailKit.Net.Imap
 					if (token.Type == ImapTokenType.OpenParen)
 						await SkipParenthesizedList (engine, doAsync, cancellationToken).ConfigureAwait (false);
 					break;
+				}
+
+				if (parenthesized) {
+					// Note: This is the second half of the Lotus Domino IMAP server work-around.
+					token = await engine.ReadTokenAsync (doAsync, cancellationToken).ConfigureAwait (false);
+					ImapEngine.AssertToken (token, ImapTokenType.CloseParen, ImapEngine.GenericUntaggedResponseSyntaxErrorFormat, "FETCH", token);
 				}
 			} while (true);
 
@@ -458,6 +478,11 @@ namespace MailKit.Net.Imap
 					tokens.Add ("MODSEQ");
 			}
 
+			if ((engine.Capabilities & ImapCapabilities.Annotate) != 0) {
+				if ((items & MessageSummaryItems.Annotations) != 0)
+					tokens.Add ("ANNOTATION (/* (value size))");
+			}
+
 			if ((engine.Capabilities & ImapCapabilities.ObjectID) != 0) {
 				if ((items & MessageSummaryItems.Id) != 0)
 					tokens.Add ("EMAILID");
@@ -520,7 +545,7 @@ namespace MailKit.Net.Imap
 
 		internal static string GetPreviewText (MemoryStream memory, string charset)
 		{
-#if !PORTABLE && !NETSTANDARD && !NETFX_CORE
+#if !NETSTANDARD1_3 && !NETSTANDARD1_6
 			var content = memory.GetBuffer ();
 #else
 			var content = memory.ToArray ();
@@ -562,18 +587,24 @@ namespace MailKit.Net.Imap
 				this.ctx = ctx;
 			}
 
-			public override void Add (Section section)
+			public override Task AddAsync (Section section, bool doAsync, CancellationToken cancellationToken)
 			{
 				MessageSummary message;
 
 				if (!ctx.TryGetValue (section.Index, out message))
-					return;
+					return Complete;
 
 				var body = message.TextBody ?? message.HtmlBody;
+				if (body == null)
+					return Complete;
+
 				var charset = body.ContentType.Charset;
 				ContentEncoding encoding;
 
-				MimeUtils.TryParse (body.ContentTransferEncoding, out encoding);
+				if (!string.IsNullOrEmpty (body.ContentTransferEncoding))
+					MimeUtils.TryParse (body.ContentTransferEncoding, out encoding);
+				else
+					encoding = ContentEncoding.Default;
 
 				using (var memory = new MemoryStream ()) {
 					var content = new MimeContent (section.Stream, encoding);
@@ -584,10 +615,13 @@ namespace MailKit.Net.Imap
 					message.Fields |= MessageSummaryItems.PreviewText;
 					folder.OnMessageSummaryFetched (message);
 				}
+
+				return Complete;
 			}
 
-			public override void SetUniqueId (int index, UniqueId uid)
+			public override Task SetUniqueIdAsync (int index, UniqueId uid, bool doAsync, CancellationToken cancellationToken)
 			{
+				return Complete;
 			}
 		}
 
@@ -3434,6 +3468,7 @@ namespace MailKit.Net.Imap
 
 		abstract class FetchStreamContextBase : IDisposable
 		{
+			protected static readonly Task Complete = Task.FromResult (true);
 			public readonly List<Section> Sections = new List<Section> ();
 			readonly ITransferProgress progress;
 
@@ -3442,7 +3477,7 @@ namespace MailKit.Net.Imap
 				this.progress = progress;
 			}
 
-			public abstract void Add (Section section);
+			public abstract Task AddAsync (Section section, bool doAsync, CancellationToken cancellationToken);
 
 			public virtual bool Contains (int index, string specifier, out Section section)
 			{
@@ -3450,7 +3485,7 @@ namespace MailKit.Net.Imap
 				return false;
 			}
 
-			public abstract void SetUniqueId (int index, UniqueId uid);
+			public abstract Task SetUniqueIdAsync (int index, UniqueId uid, bool doAsync, CancellationToken cancellationToken);
 
 			public void Report (long nread, long total)
 			{
@@ -3479,9 +3514,10 @@ namespace MailKit.Net.Imap
 			{
 			}
 
-			public override void Add (Section section)
+			public override Task AddAsync (Section section, bool doAsync, CancellationToken cancellationToken)
 			{
 				Sections.Add (section);
+				return Complete;
 			}
 
 			public bool TryGetSection (UniqueId uid, string specifier, out Section section, bool remove = false)
@@ -3528,23 +3564,27 @@ namespace MailKit.Net.Imap
 				return false;
 			}
 
-			public override void SetUniqueId (int index, UniqueId uid)
+			public override Task SetUniqueIdAsync (int index, UniqueId uid, bool doAsync, CancellationToken cancellationToken)
 			{
 				for (int i = 0; i < Sections.Count; i++) {
 					if (Sections[i].Index == index)
 						Sections[i].UniqueId = uid;
 				}
+
+				return Complete;
 			}
 		}
 
 		async Task FetchStreamAsync (ImapEngine engine, ImapCommand ic, int index, bool doAsync)
 		{
 			var token = await engine.ReadTokenAsync (doAsync, ic.CancellationToken).ConfigureAwait (false);
+			var annotations = new AnnotationsChangedEventArgs (index);
 			var labels = new MessageLabelsChangedEventArgs (index);
 			var flags = new MessageFlagsChangedEventArgs (index);
 			var modSeq = new ModSeqChangedEventArgs (index);
 			var ctx = (FetchStreamContextBase) ic.UserData;
 			var sectionBuilder = new StringBuilder ();
+			bool annotationsChanged = false;
 			bool modSeqChanged = false;
 			bool labelsChanged = false;
 			bool flagsChanged = false;
@@ -3561,7 +3601,16 @@ namespace MailKit.Net.Imap
 			do {
 				token = await engine.ReadTokenAsync (doAsync, ic.CancellationToken).ConfigureAwait (false);
 
-				if (token.Type == ImapTokenType.CloseParen || token.Type == ImapTokenType.Eoln)
+				if (token.Type == ImapTokenType.Eoln) {
+					// Note: Most likely the the message body was calculated to be 1 or 2 bytes too
+					// short (e.g. did not include the trailing <CRLF>) and that is the EOLN we just
+					// reached. Ignore it and continue as normal.
+					//
+					// See https://github.com/jstedfast/MailKit/issues/954 for details.
+					token = await engine.ReadTokenAsync (doAsync, ic.CancellationToken).ConfigureAwait (false);
+				}
+
+				if (token.Type == ImapTokenType.CloseParen)
 					break;
 
 				ImapEngine.AssertToken (token, ImapTokenType.Atom, ImapEngine.GenericUntaggedResponseSyntaxErrorFormat, "FETCH", token);
@@ -3571,7 +3620,7 @@ namespace MailKit.Net.Imap
 				ulong modseq;
 				uint value;
 
-				switch (atom) {
+				switch (atom.ToUpperInvariant ()) {
 				case "BODY":
 					token = await engine.ReadTokenAsync (doAsync, ic.CancellationToken).ConfigureAwait (false);
 
@@ -3704,7 +3753,7 @@ namespace MailKit.Net.Imap
 						section.Stream.Dispose ();
 
 					section = new Section (stream, index, uid, name, offset, length);
-					ctx.Add (section);
+					await ctx.AddAsync (section, doAsync, ic.CancellationToken).ConfigureAwait (false);
 					break;
 				case "UID":
 					token = await engine.ReadTokenAsync (doAsync, ic.CancellationToken).ConfigureAwait (false);
@@ -3712,8 +3761,10 @@ namespace MailKit.Net.Imap
 					value = ImapEngine.ParseNumber (token, true, ImapEngine.GenericItemSyntaxErrorFormat, atom, token);
 					uid = new UniqueId (UidValidity, value);
 
-					ctx.SetUniqueId (index, uid.Value);
+					await ctx.SetUniqueIdAsync (index, uid.Value, doAsync, ic.CancellationToken).ConfigureAwait (false);
 
+					annotations.UniqueId = uid.Value;
+					modSeq.UniqueId = uid.Value;
 					labels.UniqueId = uid.Value;
 					flags.UniqueId = uid.Value;
 					break;
@@ -3733,6 +3784,7 @@ namespace MailKit.Net.Imap
 					if (modseq > HighestModSeq)
 						UpdateHighestModSeq (modseq);
 
+					annotations.ModSeq = modseq;
 					modSeq.ModSeq = modseq;
 					labels.ModSeq = modseq;
 					flags.ModSeq = modseq;
@@ -3749,6 +3801,12 @@ namespace MailKit.Net.Imap
 					// may send it if another client has recently modified the message labels.
 					labels.Labels = await ImapUtils.ParseLabelsListAsync (engine, doAsync, ic.CancellationToken).ConfigureAwait (false);
 					labelsChanged = true;
+					break;
+				case "ANNOTATION":
+					// even though we didn't request this piece of information, the IMAP server
+					// may send it if another client has recently modified the message annotations.
+					annotations.Annotations = await ImapUtils.ParseAnnotationsAsync (engine, doAsync, ic.CancellationToken).ConfigureAwait (false);
+					annotationsChanged = true;
 					break;
 				default:
 					// Unexpected or unknown token (such as XAOL.SPAM.REASON or XAOL-MSGID). Simply read 1 more token (the argument) and ignore.
@@ -3767,6 +3825,9 @@ namespace MailKit.Net.Imap
 
 			if (labelsChanged)
 				OnMessageLabelsChanged (labels);
+
+			if (annotationsChanged)
+				OnAnnotationsChanged (annotations);
 
 			if (modSeqChanged)
 				OnModSeqChanged (modSeq);
@@ -6265,30 +6326,39 @@ namespace MailKit.Net.Imap
 
 		class FetchStreamCallbackContext : FetchStreamContextBase
 		{
-			readonly ImapFetchStreamCallback callback;
 			readonly ImapFolder folder;
+			readonly object callback;
 
-			public FetchStreamCallbackContext (ImapFolder folder, ImapFetchStreamCallback callback, ITransferProgress progress) : base (progress)
+			public FetchStreamCallbackContext (ImapFolder folder, object callback, ITransferProgress progress) : base (progress)
 			{
 				this.folder = folder;
 				this.callback = callback;
 			}
 
-			public override void Add (Section section)
+			Task InvokeCallbackAsync (ImapFolder folder, int index, UniqueId uid, Stream stream, bool doAsync, CancellationToken cancellationToken)
+			{
+				if (doAsync)
+					return ((ImapFetchStreamAsyncCallback) callback) (folder, index, uid, stream, cancellationToken);
+
+				((ImapFetchStreamCallback) callback) (folder, index, uid, stream);
+				return Complete;
+			}
+
+			public override async Task AddAsync (Section section, bool doAsync, CancellationToken cancellationToken)
 			{
 				if (section.UniqueId.HasValue) {
-					callback (folder, section.Index, section.UniqueId.Value, section.Stream);
+					await InvokeCallbackAsync (folder, section.Index, section.UniqueId.Value, section.Stream, doAsync, cancellationToken).ConfigureAwait (false);
 					section.Stream.Dispose ();
 				} else {
 					Sections.Add (section);
 				}
 			}
 
-			public override void SetUniqueId (int index, UniqueId uid)
+			public override async Task SetUniqueIdAsync (int index, UniqueId uid, bool doAsync, CancellationToken cancellationToken)
 			{
 				for (int i = 0; i < Sections.Count; i++) {
 					if (Sections[i].Index == index) {
-						callback (folder, index, uid, Sections[i].Stream);
+						await InvokeCallbackAsync (folder, index, uid, Sections[i].Stream, doAsync, cancellationToken).ConfigureAwait (false);
 						Sections[i].Stream.Dispose ();
 						Sections.RemoveAt (i);
 						break;
@@ -6297,7 +6367,7 @@ namespace MailKit.Net.Imap
 			}
 		}
 
-		async Task GetStreamsAsync (IList<UniqueId> uids, ImapFetchStreamCallback callback, bool doAsync, CancellationToken cancellationToken, ITransferProgress progress)
+		async Task GetStreamsAsync (IList<UniqueId> uids, object callback, bool doAsync, CancellationToken cancellationToken, ITransferProgress progress)
 		{
 			if (uids == null)
 				throw new ArgumentNullException (nameof (uids));
@@ -6332,7 +6402,7 @@ namespace MailKit.Net.Imap
 			}
 		}
 
-		async Task GetStreamsAsync (IList<int> indexes, ImapFetchStreamCallback callback, bool doAsync, CancellationToken cancellationToken, ITransferProgress progress)
+		async Task GetStreamsAsync (IList<int> indexes, object callback, bool doAsync, CancellationToken cancellationToken, ITransferProgress progress)
 		{
 			if (indexes == null)
 				throw new ArgumentNullException (nameof (indexes));
@@ -6368,7 +6438,7 @@ namespace MailKit.Net.Imap
 			}
 		}
 
-		async Task GetStreamsAsync (int min, int max, ImapFetchStreamCallback callback, bool doAsync, CancellationToken cancellationToken, ITransferProgress progress)
+		async Task GetStreamsAsync (int min, int max, object callback, bool doAsync, CancellationToken cancellationToken, ITransferProgress progress)
 		{
 			if (min < 0)
 				throw new ArgumentOutOfRangeException (nameof (min));
@@ -6459,6 +6529,7 @@ namespace MailKit.Net.Imap
 		/// <remarks>
 		/// <para>Asynchronously gets the streams for the specified messages.</para>
 		/// </remarks>
+		/// <returns>An awaitable task.</returns>
 		/// <param name="uids">The uids of the messages.</param>
 		/// <param name="callback"></param>
 		/// <param name="cancellationToken">The cancellation token.</param>
@@ -6495,7 +6566,7 @@ namespace MailKit.Net.Imap
 		/// <exception cref="ImapCommandException">
 		/// The server replied with a NO or BAD response.
 		/// </exception>
-		public virtual Task GetStreamsAsync (IList<UniqueId> uids, ImapFetchStreamCallback callback, CancellationToken cancellationToken = default (CancellationToken), ITransferProgress progress = null)
+		public virtual Task GetStreamsAsync (IList<UniqueId> uids, ImapFetchStreamAsyncCallback callback, CancellationToken cancellationToken = default (CancellationToken), ITransferProgress progress = null)
 		{
 			return GetStreamsAsync (uids, callback, true, cancellationToken, progress);
 		}
@@ -6553,6 +6624,7 @@ namespace MailKit.Net.Imap
 		/// <remarks>
 		/// <para>Asynchronously gets the streams for the specified messages.</para>
 		/// </remarks>
+		/// <returns>An awaitable task.</returns>
 		/// <param name="indexes">The indexes of the messages.</param>
 		/// <param name="callback"></param>
 		/// <param name="cancellationToken">The cancellation token.</param>
@@ -6589,7 +6661,7 @@ namespace MailKit.Net.Imap
 		/// <exception cref="ImapCommandException">
 		/// The server replied with a NO or BAD response.
 		/// </exception>
-		public virtual Task GetStreamsAsync (IList<int> indexes, ImapFetchStreamCallback callback, CancellationToken cancellationToken = default (CancellationToken), ITransferProgress progress = null)
+		public virtual Task GetStreamsAsync (IList<int> indexes, ImapFetchStreamAsyncCallback callback, CancellationToken cancellationToken = default (CancellationToken), ITransferProgress progress = null)
 		{
 			return GetStreamsAsync (indexes, callback, true, cancellationToken, progress);
 		}
@@ -6648,6 +6720,7 @@ namespace MailKit.Net.Imap
 		/// <remarks>
 		/// <para>Asynchronously gets the streams for the specified messages.</para>
 		/// </remarks>
+		/// <returns>An awaitable task.</returns>
 		/// <param name="min">The minimum index.</param>
 		/// <param name="max">The maximum index, or <c>-1</c> to specify no upper bound.</param>
 		/// <param name="callback"></param>
@@ -6685,7 +6758,7 @@ namespace MailKit.Net.Imap
 		/// <exception cref="ImapCommandException">
 		/// The server replied with a NO or BAD response.
 		/// </exception>
-		public virtual Task GetStreamsAsync (int min, int max, ImapFetchStreamCallback callback, CancellationToken cancellationToken = default (CancellationToken), ITransferProgress progress = null)
+		public virtual Task GetStreamsAsync (int min, int max, ImapFetchStreamAsyncCallback callback, CancellationToken cancellationToken = default (CancellationToken), ITransferProgress progress = null)
 		{
 			return GetStreamsAsync (min, max, callback, true, cancellationToken, progress);
 		}
